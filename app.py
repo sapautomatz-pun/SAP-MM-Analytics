@@ -55,7 +55,7 @@ def make_download_link(data, filename):
 # ---------- FILE UPLOAD ---------- #
 
 uploaded_file = st.file_uploader("Upload your SAP PO or GRN file", type=["csv", "xlsx"])
-query_params = st.query.params()
+query_params = st.st.experimental_get_query_params()
 
 # ----- Case 1: Manual upload from browser ----- #
 if uploaded_file:
@@ -94,4 +94,5 @@ elif "api" in query_params:
         st.json({"status": "error", "message": "No file URL provided."})
 else:
     st.info("Upload file manually above or call this endpoint via Make.com with ?api=1&fileurl=<public_csv_url>")
+
 
