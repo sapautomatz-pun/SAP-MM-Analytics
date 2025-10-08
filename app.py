@@ -73,3 +73,6 @@ st.markdown("""
 ---
 ### 🔗 Manual Upload (Alternative)
 If upload fails, you can manually send your file to the Make.com webhook:
+`https://hook.us1.make.com/YOUR_WEBHOOK_ID`
+""")
+
