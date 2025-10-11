@@ -1,7 +1,7 @@
+fpdf
 streamlit
 pandas
-openai
-fpdf2>=2.7
+numpy
 matplotlib
 requests
-numpy
+openai
