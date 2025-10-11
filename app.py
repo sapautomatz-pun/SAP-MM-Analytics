@@ -1,19 +1,18 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI App (v24.0)
-# Global Currency & Multi-Currency Comparison + Unicode-safe PDF
-# ==========================================================
+# SAP AUTOMATZ - Procurement Analytics AI (v26.0)
 # Features:
-# - Cross-platform font handling (Windows / Linux)
-# - Auto-detect currency per-row and per-file
-# - Multi-currency comparison mode with user-editable exchange rates
-# - Unicode-safe PDF (DejaVu) with color-coded KPI boxes
-# - Charts & Executive Summary
+#  - Access Key verification (backend)
+#  - Multi-currency analytics + charts
+#  - Safe PDF generation (Unicode, DejaVu)
+#  - Send generated PDF by email (MailerSend) if configured
+#  - "Regenerate AI Insights" without re-uploading file
 # ==========================================================
 
 import os
 import io
 import re
 import json
+import base64
 import datetime
 import platform
 import requests
@@ -26,15 +25,16 @@ import streamlit as st
 from openai import OpenAI
 from fpdf import FPDF
 
-# -----------------------
-# Config - update as needed
-# -----------------------
-BACKEND_URL = "https://sapautomatz-backend.onrender.com"  # your backend verify endpoint
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # set in env
+# -------------------------
+# Configuration / Env vars
+# -------------------------
+BACKEND_URL = os.getenv("BACKEND_URL", "https://sapautomatz-backend.onrender.com")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY")  # optional, for email delivery
 MODEL = "gpt-4o-mini"
 LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png"
 
-# Fonts: auto-detect platform (Windows -> local fonts/, Linux -> system path)
+# Font paths
 if platform.system() == "Windows":
     FONT_PATH = "./fonts/DejaVuSans.ttf"
     FONT_PATH_BOLD = "./fonts/DejaVuSans-Bold.ttf"
@@ -42,26 +42,56 @@ else:
     FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     FONT_PATH_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
+# OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -----------------------
-# Streamlit page config
-# -----------------------
+# -------------------------
+# Streamlit page setup
+# -------------------------
 st.set_page_config(page_title="SAP Automatz - Procurement Analytics AI", page_icon="📊", layout="wide")
 st.markdown("<style>.stApp header{visibility:hidden}</style>", unsafe_allow_html=True)
 
-# HEADER
-c1, c2 = st.columns([1, 3])
-with c1:
+# Header / branding
+col1, col2 = st.columns([1, 3])
+with col1:
     st.image(LOGO_URL, width=160)
-with c2:
+with col2:
     st.markdown("<h2 style='margin-bottom:0'>SAP Automatz Procurement Analytics AI</h2>"
                 "<p style='color:#555;margin-top:0'>Automate. Analyze. Accelerate 🚀</p>", unsafe_allow_html=True)
 st.divider()
 
-# -----------------------
-# Utility functions
-# -----------------------
+# -------------------------
+# Access verification
+# -------------------------
+if "verified" not in st.session_state:
+    st.session_state.verified = False
+
+if not st.session_state.verified:
+    st.markdown("### 🔐 Verify Access")
+    access_key = st.text_input("Enter access key", type="password")
+    if st.button("Verify Access"):
+        try:
+            # example endpoint: GET BACKEND_URL/verify_key/{key} returning JSON {"valid": true/false, ...}
+            resp = requests.get(f"{BACKEND_URL}/verify_key/{access_key}", timeout=10)
+            ok = False
+            try:
+                ok = resp.status_code == 200 and resp.json().get("valid", False)
+            except:
+                ok = False
+            if ok:
+                st.session_state.verified = True
+                st.session_state.access_key = access_key
+                st.success("✅ Access verified — you may continue.")
+                st.experimental_rerun()
+            else:
+                st.error("❌ Invalid access key. Please check.")
+        except Exception as e:
+            st.error(f"Verification error: {e}")
+    st.stop()
+
+# -------------------------
+# Helper functions
+# -------------------------
 def normalize_columns(df):
     df = df.rename(columns=lambda x: str(x).strip().upper())
     mapping = {
@@ -78,26 +108,23 @@ def normalize_columns(df):
     return df
 
 def coerce_types(df):
-    for c in ["PO_DATE", "GRN_DATE"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-    for c in ["QUANTITY"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "PO_DATE" in df.columns:
+        df["PO_DATE"] = pd.to_datetime(df["PO_DATE"], errors="coerce")
+    if "GRN_DATE" in df.columns:
+        df["GRN_DATE"] = pd.to_datetime(df["GRN_DATE"], errors="coerce")
+    if "QUANTITY" in df.columns:
+        df["QUANTITY"] = pd.to_numeric(df["QUANTITY"], errors="coerce")
     return df
 
-# Value parsing: handles numeric, or strings with currency symbols like "₹1234" or "$1,234.56"
-CURRENCY_SYMBOLS = {"₹":"INR", "$":"USD", "€":"EUR", "£":"GBP", "¥":"JPY"}  # ¥ maps to JPY or CNY - we use JPY by default
+CURRENCY_SYMBOLS = {"₹":"INR", "$":"USD", "€":"EUR", "£":"GBP", "¥":"JPY"}
 
 def parse_value_and_currency(val, default_currency=None):
-    """Return (numeric_value, currency_code or None)"""
     if pd.isna(val):
-        return (np.nan, None)
+        return (np.nan, default_currency)
     if isinstance(val, (int, float, np.number)):
         return (float(val), default_currency)
     s = str(val).strip()
-    # If explicit currency column exists, caller will pass default_currency
-    # Look for currency symbols at start
+    # symbol at start
     m = re.match(r"^([^\d\-\+]+)\s*([0-9,.\-]+)$", s)
     if m:
         sym, num = m.group(1).strip(), m.group(2)
@@ -108,7 +135,6 @@ def parse_value_and_currency(val, default_currency=None):
             num = np.nan
         code = CURRENCY_SYMBOLS.get(sym, None)
         return (num, code)
-    # If s contains symbol anywhere, find it
     for sym, code in CURRENCY_SYMBOLS.items():
         if sym in s:
             num = re.sub(r"[^\d.\-]", "", s)
@@ -116,146 +142,78 @@ def parse_value_and_currency(val, default_currency=None):
                 return (float(num), code)
             except:
                 return (np.nan, code)
-    # else try to parse as number
     try:
         return (float(s.replace(",", "")), default_currency)
     except:
         return (np.nan, default_currency)
 
-def detect_currency_symbol_from_headers_or_sample(df):
-    """Return a currency symbol (like ₹ or $) or None"""
+def detect_currency_symbol(df):
     header = " ".join(df.columns).upper()
-    # see country codes in header
-    for code, sym in [("INR","₹"),("USD","$"),("EUR","€"),("GBP","£"),("JPY","¥"),("CNY","¥")]:
+    mapping = {"INR":"₹","USD":"$","EUR":"€","GBP":"£","JPY":"¥","CNY":"¥"}
+    for code, sym in mapping.items():
         if code in header:
             return sym
-    # sample text
     for col in df.columns:
         if df[col].dtype == "object":
-            sample = " ".join(df[col].astype(str).head(10).tolist())
-            for sym in CURRENCY_SYMBOLS.keys():
+            sample = " ".join(df[col].astype(str).head(5).values)
+            for sym in mapping.values():
                 if sym in sample:
                     return sym
-    return None
+    return "₹"
 
-# -----------------------
-# Exchange rates and conversion
-# -----------------------
-DEFAULT_EXCHANGE_RATES = {
-    "USD": 1.0,      # base
-    "INR": 0.012,    # 1 INR = 0.012 USD approx
-    "EUR": 1.05,     # 1 EUR = 1.05 USD
-    "GBP": 1.25,     # 1 GBP = 1.25 USD
-    "JPY": 0.0070,   # 1 JPY = 0.007 USD
-    "CNY": 0.14      # 1 CNY = 0.14 USD
-}
-
-def convert_to_base(amount, currency_code, rates, base="USD"):
-    """Convert numeric amount (in currency_code) to base using rates dict (rate = 1 unit currency -> USD)"""
-    if amount is None or pd.isna(amount):
-        return np.nan
-    if currency_code is None:
-        # assume base if unknown
-        currency_code = base
-    if currency_code not in rates:
-        # unknown currency: assume 1:1 to base
-        return amount
-    # rates are expressed as 1 unit currency -> USD
-    # To convert any currency to base, convert to USD then to base if base != USD
-    usd = amount * rates[currency_code]
-    if base == "USD":
-        return usd
-    # if base other than USD, we'd divide by rates[base] to get base
-    if rates.get(base):
-        return usd / rates[base]
-    return usd
-
-# -----------------------
-# KPI calculation & prompt
-# -----------------------
-def calculate_kpis_and_prepare(df):
-    """Parse VALUE and CURRENCY columns and produce dataframe with numeric 'AMOUNT' and 'CURRENCY' columns"""
-    # Ensure currency column exists; if not, we'll try to infer
+def calculate_kpis_and_parse(df):
+    # ensure currency column exists
     if "CURRENCY" not in df.columns:
         df["CURRENCY"] = None
-    # build amounts
+    # parse amounts
     amounts = []
     codes = []
-    # detect default symbol in file
-    file_sym = detect_currency_symbol_from_headers_or_sample(df)
-    inferred_default = None
-    if file_sym:
-        inferred_default = CURRENCY_SYMBOLS.get(file_sym, None)
-    for idx, row in df.iterrows():
-        raw_val = row.get("VALUE", None)
-        default_curr = row.get("CURRENCY", None) or inferred_default
-        num, code = parse_value_and_currency(raw_val, default_curr)
+    inferred_symbol = detect_currency_symbol(df)
+    inferred_default = CURRENCY_SYMBOLS.get(inferred_symbol, None)
+    for _, row in df.iterrows():
+        raw = row.get("VALUE", None)
+        default = row.get("CURRENCY", None) or inferred_default
+        num, code = parse_value_and_currency(raw, default)
         if code is None:
-            code = default_curr
-        amounts.append(num)
+            code = default or "USD"
+        amounts.append(num if not pd.isna(num) else 0.0)
         codes.append(code)
-    df["AMOUNT"] = amounts
+    df["AMOUNT"] = pd.to_numeric(amounts, errors="coerce").fillna(0.0)
     df["CURRENCY_DETECTED"] = codes
-    # If there are still missing currency codes, fill with inferred_default or 'USD'
-    df["CURRENCY_DETECTED"].fillna(inferred_default or "USD", inplace=True)
-
-    # Numeric cleanup
-    df["AMOUNT"] = pd.to_numeric(df["AMOUNT"], errors="coerce").fillna(0.0)
-
-    # KPIs basic
     kpis = {}
     kpis["records"] = len(df)
-    # sum per currency
-    sums_per_currency = df.groupby("CURRENCY_DETECTED")["AMOUNT"].sum().to_dict()
-    kpis["sums_per_currency"] = sums_per_currency
-    kpis["total_records"] = len(df)
-    # total spend (no conversion) also
+    kpis["sums_per_currency"] = df.groupby("CURRENCY_DETECTED")["AMOUNT"].sum().to_dict()
     kpis["total_spend_raw"] = df["AMOUNT"].sum()
-    # If PO_DATE & GRN_DATE present compute cycle days
     if "PO_DATE" in df.columns and "GRN_DATE" in df.columns:
-        try:
-            df["PO_DATE"] = pd.to_datetime(df["PO_DATE"], errors="coerce")
-            df["GRN_DATE"] = pd.to_datetime(df["GRN_DATE"], errors="coerce")
-            df["CYCLE_DAYS"] = (df["GRN_DATE"] - df["PO_DATE"]).dt.days
-            kpis["avg_cycle_days"] = float(df["CYCLE_DAYS"].mean())
-            kpis["delayed_count"] = int(df[df["CYCLE_DAYS"] > 7].shape[0])
-        except Exception:
-            kpis["avg_cycle_days"] = None
-            kpis["delayed_count"] = 0
+        df["CYCLE_DAYS"] = (df["GRN_DATE"] - df["PO_DATE"]).dt.days
+        kpis["avg_cycle_days"] = float(df["CYCLE_DAYS"].mean()) if not df["CYCLE_DAYS"].isna().all() else None
+        kpis["delayed_count"] = int(df[df["CYCLE_DAYS"] > 7].shape[0])
     else:
         kpis["avg_cycle_days"] = None
         kpis["delayed_count"] = 0
-
-    # Top vendor by AMOUNT in their currencies (not converted)
-    if "VENDOR" in df.columns:
-        try:
-            top_vendor = df.groupby("VENDOR")["AMOUNT"].sum().idxmax()
-            kpis["top_vendor"] = top_vendor
-        except Exception:
-            kpis["top_vendor"] = "N/A"
-    else:
+    try:
+        kpis["top_vendor"] = df.groupby("VENDOR")["AMOUNT"].sum().idxmax()
+    except:
         kpis["top_vendor"] = "N/A"
-
     return df, kpis
 
-def build_prompt_for_ai(kpis, currency_summary_str):
+def build_ai_prompt(kpis, currency_summary_str):
     return f"""
-You are a procurement analytics assistant. Use the following summary data and provide a concise executive summary.
+You are a senior procurement analyst. Use the summary below and write a concise executive summary and recommendations.
 
 Summary:
-Total records: {kpis['records']}
-Totals by currency: {currency_summary_str}
-Average cycle days: {kpis.get('avg_cycle_days')}
-Delayed shipments (>7 days): {kpis.get('delayed_count')}
-Top vendor (by amount): {kpis.get('top_vendor')}
+- Total records: {kpis['records']}
+- Totals by currency: {currency_summary_str}
+- Average cycle days: {kpis.get('avg_cycle_days')}
+- Delayed shipments (>7 days): {kpis.get('delayed_count')}
+- Top vendor: {kpis.get('top_vendor')}
 
-Provide four short sections:
+Provide four sections:
 1) Executive Summary
 2) Key Observations
 3) Root Causes
 4) Actionable Recommendations
-
-Keep responses short and professional (approx 300-450 words).
+Keep it concise and suitable for senior management.
 """
 
 def get_ai_summary(prompt):
@@ -263,7 +221,7 @@ def get_ai_summary(prompt):
         resp = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role":"system","content":"You are a senior procurement analyst producing an executive report."},
+                {"role":"system","content":"You are an expert procurement analyst."},
                 {"role":"user","content":prompt}
             ],
             temperature=0.2,
@@ -271,55 +229,66 @@ def get_ai_summary(prompt):
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        return f"AI generation error: {e}"
+        return f"AI error: {e}"
 
-# -----------------------
 # Chart helpers
-# -----------------------
-def save_vendor_chart(df, out_path="/tmp/vendor_chart.png"):
+def save_vendor_chart(df, out_path="vendor_chart.png"):
     if "VENDOR" in df.columns:
         top = df.groupby("VENDOR")["AMOUNT"].sum().nlargest(10)
-        plt.figure(figsize=(8,4))
-        top.plot(kind="bar", color="steelblue")
-        plt.title("Top Vendors by Amount")
-        plt.ylabel("Amount (native currency)")
-        plt.tight_layout()
-        plt.savefig(out_path)
-        plt.close()
+        plt.figure(figsize=(8,4)); top.plot(kind="bar", color="steelblue")
+        plt.title("Top Vendors by Amount"); plt.tight_layout(); plt.savefig(out_path); plt.close()
         return out_path
     return None
 
-def save_monthly_trend_chart(df, out_path="/tmp/trend_chart.png"):
+def save_trend_chart(df, out_path="trend_chart.png"):
     if "PO_DATE" in df.columns:
-        df2 = df.dropna(subset=["PO_DATE"])
-        if not df2.empty:
-            df2["MONTH"] = df2["PO_DATE"].dt.to_period("M").astype(str)
-            monthly = df2.groupby("MONTH")["AMOUNT"].sum().sort_index()
-            plt.figure(figsize=(8,4))
-            monthly.plot(marker='o', color='darkorange')
-            plt.title("Monthly Spend Trend (native currency)")
-            plt.tight_layout()
-            plt.savefig(out_path)
-            plt.close()
+        tmp = df.dropna(subset=["PO_DATE"])
+        if not tmp.empty:
+            tmp["MONTH"]=tmp["PO_DATE"].dt.to_period("M").astype(str)
+            m = tmp.groupby("MONTH")["AMOUNT"].sum()
+            plt.figure(figsize=(8,4)); m.plot(marker='o', color="darkorange"); plt.title("Monthly Spend Trend"); plt.tight_layout(); plt.savefig(out_path); plt.close()
             return out_path
     return None
 
-def save_material_pie(df, out_path="/tmp/material_chart.png"):
+def save_material_pie(df, out_path="material_chart.png"):
     if "MATERIAL" in df.columns:
         mat = df.groupby("MATERIAL")["AMOUNT"].sum().nlargest(6)
         if not mat.empty:
-            plt.figure(figsize=(5,5))
-            plt.pie(mat, labels=mat.index, autopct="%1.1f%%")
-            plt.title("Material Spend Distribution")
-            plt.tight_layout()
-            plt.savefig(out_path)
-            plt.close()
+            plt.figure(figsize=(5,5)); plt.pie(mat, labels=mat.index, autopct="%1.1f%%"); plt.title("Material Spend"); plt.tight_layout(); plt.savefig(out_path); plt.close()
             return out_path
     return None
 
-# -----------------------
-# PDF generation (Unicode-safe + multi-currency summary and KPI boxes)
-# -----------------------
+# -------------------------
+# Safe PDF generation utilities
+# -------------------------
+def safe_text_for_pdf(t):
+    if t is None:
+        return "N/A"
+    s = str(t)
+    # remove control characters but keep Unicode (we will use DejaVu)
+    s = re.sub(r"[\x00-\x1F\x7F]", " ", s)
+    # replace zero-width or nbsp
+    s = s.replace("\u200b"," ").replace("\u202f"," ").replace("\xa0"," ")
+    return s.strip()
+
+def safe_multicell(pdf, w, h, text):
+    # Break text into safe chunks to avoid "Not enough horizontal space" errors
+    if not text:
+        pdf.multi_cell(w, h, "N/A")
+        return
+    s = safe_text_for_pdf(text)
+    # ensure no crazy long tokens: insert spaces every 60 characters in sequences of non-space chars
+    s = re.sub(r"(\S{60})", r"\1 ", s)
+    # split by sentences/near 100 char chunks
+    chunks = re.findall(r".{1,100}(?:\s+|$)", s)
+    for chunk in chunks:
+        c = chunk.strip()
+        if c:
+            try:
+                pdf.multi_cell(w, h, c)
+            except Exception:
+                pdf.multi_cell(w, h, c[:80] + "...")
+
 class DejaVuPDF(FPDF):
     def header(self):
         self.set_fill_color(33,86,145)
@@ -329,22 +298,22 @@ class DejaVuPDF(FPDF):
         except:
             pass
         self.set_text_color(255,255,255)
-        self.set_font("DejaVu", "B", 14)
+        try:
+            self.set_font("DejaVu","B",14)
+        except:
+            self.set_font("Helvetica","B",14)
         self.cell(0,10,"SAP Automatz - Procurement Analytics Report", align="C", ln=True)
         self.ln(2)
     def footer(self):
         self.set_y(-15)
-        # ensure font exists on each footer call
         try:
-            self.set_font("DejaVu", "I", 9)
+            self.set_font("DejaVu","I",9)
         except:
-            # fallback to builtin
-            self.set_font("Helvetica", "I", 9)
+            self.set_font("Helvetica","I",9)
         self.set_text_color(130,130,130)
         self.cell(0,10,"©2025 SAP Automatz – Powered by Gen AI", align="C")
 
-def ensure_fonts_registered(pdf):
-    # Register DejaVu fonts once (safe)
+def ensure_fonts(pdf):
     try:
         if os.path.exists(FONT_PATH):
             pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
@@ -353,38 +322,32 @@ def ensure_fonts_registered(pdf):
     except Exception:
         pass
 
-def generate_pdf_with_multicurrency(ai_text, kpis, chart_paths, currency_base, exchange_rates, converted_totals):
-    """Generate a PDF which is Unicode-safe, includes KPI boxes and multi-currency converted totals."""
+def generate_pdf(ai_text, kpis, chart_paths, display_currency_symbol="₹"):
     pdf = DejaVuPDF()
-    ensure_fonts_registered(pdf)
-    # set default font (safe)
+    ensure_fonts(pdf)
     try:
-        pdf.set_font("DejaVu", "", 12)
+        pdf.set_font("DejaVu","",12)
     except:
-        pdf.set_font("Helvetica", "", 12)
+        pdf.set_font("Helvetica","",12)
     pdf.add_page()
 
-    # Header line
     pdf.cell(0,10, "📈 Executive Summary Dashboard", ln=True)
     pdf.ln(6)
 
-    # KPI boxes (color-coded)
+    # KPI boxes
     def kpi_color(v, good, warn):
         try:
             val = float(v)
         except:
             return (180,180,180)
-        if val <= good:
-            return (120,200,120)
-        elif val <= warn:
-            return (255,210,80)
-        else:
-            return (255,100,100)
+        if val <= good: return (120,200,120)
+        if val <= warn: return (255,210,80)
+        return (255,100,100)
 
     metrics = [
-        (f"Total Spend (native)", kpis.get("total_spend_raw", 0), (100000, 500000)),
-        (f"Avg Cycle Time (days)", kpis.get("avg_cycle_days", 0) or 0, (7, 15)),
-        (f"Delayed Shipments (>7d)", kpis.get("delayed_count", 0), (10, 30))
+        (f"Total Spend ({display_currency_symbol})", kpis.get("total_spend_raw", 0), (100000, 500000)),
+        ("Avg Cycle Time (days)", kpis.get("avg_cycle_days", 0) or 0, (7, 15)),
+        ("Delayed Shipments (>7d)", kpis.get("delayed_count", 0), (10, 30))
     ]
     x0, y, w, h = 15, 40, 60, 20
     for label, val, thr in metrics:
@@ -393,130 +356,233 @@ def generate_pdf_with_multicurrency(ai_text, kpis, chart_paths, currency_base, e
         pdf.rect(x0, y, w, h, "F")
         pdf.set_xy(x0+2, y+2)
         pdf.set_text_color(0,0,0)
-        pdf.set_font("DejaVu", "B", 11 if os.path.exists(FONT_PATH) else 10)
-        val_display = f"{val:,.0f}" if isinstance(val, (int, float, np.number)) else str(val)
-        pdf.multi_cell(w-4, 6, f"{label}\n{val_display}", align="C")
+        try:
+            pdf.set_font("DejaVu","B",11)
+        except:
+            pdf.set_font("Helvetica","B",11)
+        val_str = f"{val:,.0f}" if isinstance(val, (int,float,np.number)) else str(val)
+        pdf.multi_cell(w-4, 6, f"{label}\n{val_str}", align="C")
         x0 += (w + 5)
     pdf.ln(35)
 
-    # Executive summary (AI)
-    pdf.set_font("DejaVu", "B", 14)
+    # AI Executive Summary
+    try:
+        pdf.set_font("DejaVu","B",14)
+    except:
+        pdf.set_font("Helvetica","B",14)
     pdf.cell(0,8, "💼 Executive Summary", ln=True)
-    pdf.set_font("DejaVu", "", 11)
-    for line in ai_text.split("\n"):
-        pdf.multi_cell(0,6, line.strip())
+    try:
+        pdf.set_font("DejaVu","",11)
+    except:
+        pdf.set_font("Helvetica","",11)
+    # write AI text with safe_multicell
+    safe_multicell(pdf, 0, 6, ai_text)
     pdf.ln(6)
 
-    # Multi-currency converted totals (to base)
-    pdf.set_font("DejaVu", "B", 12)
-    pdf.cell(0,8, f"🌐 Multi-Currency Conversion (Base: {currency_base})", ln=True)
-    pdf.set_font("DejaVu", "", 11)
+    # Multi-currency summary table (simple)
+    try:
+        pdf.set_font("DejaVu","B",12)
+    except:
+        pdf.set_font("Helvetica","B",12)
+    pdf.cell(0,8, "🌐 Totals by Currency (native)", ln=True)
+    try:
+        pdf.set_font("DejaVu","",11)
+    except:
+        pdf.set_font("Helvetica","",11)
     for cur, amt in kpis.get("sums_per_currency", {}).items():
-        converted = converted_totals.get(cur, 0.0)
-        pdf.multi_cell(0,6, f"{cur}: {amt:,.2f}  →  {currency_base}{converted:,.2f}")
+        line = f"{cur}: {amt:,.2f}"
+        pdf.multi_cell(0,6, line)
     pdf.ln(6)
 
-    # Charts
+    # Charts - new page
     pdf.add_page()
     for name, path in chart_paths.items():
-        pdf.set_font("DejaVu", "B", 12)
+        try:
+            pdf.set_font("DejaVu","B",12)
+        except:
+            pdf.set_font("Helvetica","B",12)
         pdf.cell(0,8, name, ln=True)
         try:
             pdf.image(path, w=160)
         except:
-            pdf.multi_cell(0,6, f"(Chart {name} unavailable)")
+            pdf.multi_cell(0,6, f"(Chart {name} missing)")
         pdf.ln(6)
 
     return io.BytesIO(pdf.output(dest="S").encode("latin-1", "ignore"))
 
-# -----------------------
-# Streamlit UI
-# -----------------------
-st.title("SAP Automatz — Multi-currency Procurement Analytics")
+# -------------------------
+# Email (MailerSend) helper
+# -------------------------
+def send_pdf_via_mailersend(api_key, sender_email, sender_name, recipient_email, subject, text_content, pdf_bytes, filename="report.pdf"):
+    if not api_key:
+        raise RuntimeError("MAILERSEND_API_KEY not set.")
+    url = "https://api.mailersend.com/v1/email"
+    # attachments require base64 encoded content
+    b64 = base64.b64encode(pdf_bytes.getvalue()).decode("ascii")
+    payload = {
+        "from": {"email": sender_email, "name": sender_name},
+        "to": [{"email": recipient_email}],
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": text_content}],
+        "attachments": [{"content": b64, "filename": filename}]
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    resp = requests.post(url, headers=headers, json=payload, timeout=15)
+    return resp
 
-uploaded = st.file_uploader("Upload SAP PO/GRN CSV or XLSX (test dataset has mixed currencies)", type=["csv", "xlsx"])
-multicurrency_mode = st.checkbox("Enable Multi-currency Comparison Mode (convert to base currency)", value=True)
+# -------------------------
+# Main UI logic
+# -------------------------
+st.title("SAP Automatz — Procurement Analytics (v26.0)")
 
-# editable exchange rates (user can override)
-st.markdown("**Exchange rates (1 unit currency → USD)** — edit if you want different rates.")
-rates = DEFAULT_EXCHANGE_RATES.copy() if 'DEFAULT_EXCHANGE_RATES' in globals() else DEFAULT_EXCHANGE_RATES
-# Allow user to override
-col1, col2, col3 = st.columns(3)
-with col1:
-    rates["USD"] = st.number_input("USD → USD", value=rates.get("USD",1.0), format="%.6f")
-    rates["INR"] = st.number_input("INR → USD", value=rates.get("INR",0.012), format="%.6f")
-with col2:
-    rates["EUR"] = st.number_input("EUR → USD", value=rates.get("EUR",1.05), format="%.6f")
-    rates["GBP"] = st.number_input("GBP → USD", value=rates.get("GBP",1.25), format="%.6f")
-with col3:
-    rates["JPY"] = st.number_input("JPY → USD", value=rates.get("JPY",0.0070), format="%.6f")
-    rates["CNY"] = st.number_input("CNY → USD", value=rates.get("CNY",0.14), format="%.6f")
-
+uploaded = st.file_uploader("Upload SAP PO / GRN CSV or XLSX", type=["csv", "xlsx"])
+# Preserve uploaded file in session so we can regenerate AI without re-upload
 if uploaded:
-    # load file
-    if uploaded.name.lower().endswith(".xlsx"):
-        df = pd.read_excel(uploaded)
-    else:
-        df = pd.read_csv(uploaded)
+    # store raw bytes so we can reload
+    st.session_state.upload_bytes = uploaded.getvalue()
+    st.session_state.upload_name = uploaded.name
 
-    df = normalize_columns(df)
-    df = coerce_types(df)
+# Exchange rates UI (simple defaults)
+st.sidebar.header("Options")
+base_currency = st.sidebar.selectbox("Base currency for combined view", ["USD","INR","EUR","GBP","JPY","CNY"], index=0)
+multicurrency_mode = st.sidebar.checkbox("Enable multi-currency conversion (show combined total)", value=True)
 
-    # parse values and currencies
-    df_parsed, kpis = calculate_kpis_and_prepare(df)
+# show exchange rate editor for conversions (optional)
+st.sidebar.markdown("**Exchange rates (1 unit currency -> USD)** (editable)")
+default_rates = {"USD":1.0,"INR":0.012,"EUR":1.05,"GBP":1.25,"JPY":0.0070,"CNY":0.14}
+rates = {}
+for code in ["USD","INR","EUR","GBP","JPY","CNY"]:
+    rates[code] = st.sidebar.number_input(f"{code} → USD", value=float(os.getenv(f"RATE_{code}", default_rates[code])), format="%.6f")
 
-    st.markdown("### Data preview")
-    st.dataframe(df_parsed.head(8))
+# Recipient email UI
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Email Delivery (optional)**")
+recipient_email = st.sidebar.text_input("Send PDF to email (optional):", value="")
+sender_email = os.getenv("MAILER_FROM_EMAIL", "sapautomatz@gmail.com")
+sender_name = os.getenv("MAILER_FROM_NAME", "SAPAutomatz")
 
-    # generate charts
-    vendor_chart = save_vendor_chart(df_parsed, out_path="vendor_chart.png")
-    material_chart = save_material_pie(df_parsed, out_path="material_chart.png")
-    trend_chart = save_monthly_trend_chart(df_parsed, out_path="trend_chart.png")
-    chart_paths = {k:v for k,v in [("Top Vendors", vendor_chart), ("Material Spend", material_chart), ("Monthly Trend", trend_chart)] if v}
+# Re-generate AI button (uses session state to avoid reupload)
+if "upload_bytes" in st.session_state and st.button("Regenerate AI Insights"):
+    # reload DataFrame from saved bytes
+    try:
+        content = st.session_state.upload_bytes
+        if st.session_state.upload_name.lower().endswith(".xlsx"):
+            df = pd.read_excel(io.BytesIO(content))
+        else:
+            df = pd.read_csv(io.BytesIO(content))
+        df = normalize_columns(df)
+        df = coerce_types(df)
+        df_parsed, kpis = calculate_kpis_and_parse(df)
+        currency_symbol = detect_currency_symbol(df)
+        # prompt & AI
+        currency_summary_str = ", ".join([f"{c}: {v:,.2f}" for c,v in kpis["sums_per_currency"].items()])
+        prompt = build_ai_prompt(kpis, currency_summary_str)
+        ai_text = get_ai_summary(prompt)
+        # charts
+        vendor_chart = save_vendor_chart(df_parsed, out_path="vendor_chart.png")
+        material_chart = save_material_pie(df_parsed, out_path="material_chart.png")
+        trend_chart = save_trend_chart(df_parsed, out_path="trend_chart.png")
+        charts_dict = {k:v for k,v in [("Top Vendors", vendor_chart), ("Material Spend", material_chart), ("Monthly Trend", trend_chart)] if v}
+        # store in session
+        st.session_state.df = df_parsed
+        st.session_state.kpis = kpis
+        st.session_state.ai_text = ai_text
+        st.session_state.charts = charts_dict
+        st.success("✅ AI Insights regenerated.")
+    except Exception as e:
+        st.error(f"Regenerate error: {e}")
 
-    # Show totals by currency
-    st.markdown("### Totals by currency (native amounts)")
-    st.table(pd.DataFrame(list(kpis["sums_per_currency"].items()), columns=["Currency","Total Amount"]))
+# If uploaded, process and show results
+if "upload_bytes" in st.session_state and "df" not in st.session_state:
+    try:
+        content = st.session_state.upload_bytes
+        name = st.session_state.upload_name
+        if name.lower().endswith(".xlsx"):
+            df = pd.read_excel(io.BytesIO(content))
+        else:
+            df = pd.read_csv(io.BytesIO(content))
+        df = normalize_columns(df)
+        df = coerce_types(df)
+        df_parsed, kpis = calculate_kpis_and_parse(df)
+        currency_symbol = detect_currency_symbol(df)
+        currency_summary_str = ", ".join([f"{c}: {v:,.2f}" for c,v in kpis["sums_per_currency"].items()])
+        prompt = build_ai_prompt(kpis, currency_summary_str)
+        ai_text = get_ai_summary(prompt)
+        vendor_chart = save_vendor_chart(df_parsed, out_path="vendor_chart.png")
+        material_chart = save_material_pie(df_parsed, out_path="material_chart.png")
+        trend_chart = save_trend_chart(df_parsed, out_path="trend_chart.png")
+        charts_dict = {k:v for k,v in [("Top Vendors", vendor_chart), ("Material Spend", material_chart), ("Monthly Trend", trend_chart)] if v}
+        st.session_state.df = df_parsed
+        st.session_state.kpis = kpis
+        st.session_state.ai_text = ai_text
+        st.session_state.charts = charts_dict
+    except Exception as e:
+        st.error(f"Processing error: {e}")
 
-    # if multicurrency mode convert sums to selected base
-    base_currency = st.selectbox("Select base currency for conversion", ["USD","INR","EUR","GBP","JPY","CNY"], index=0)
-    converted_totals = {}
+# Display analysis if available
+if "df" in st.session_state:
+    st.markdown("### Data preview (first 8 rows)")
+    st.dataframe(st.session_state.df.head(8))
+
+    st.markdown("### AI Executive Summary")
+    st.write(st.session_state.ai_text or "No AI summary available.")
+
+    st.markdown("### Charts")
+    for k,v in st.session_state.charts.items():
+        st.image(v, caption=k)
+
+    # Multi-currency conversion and combined total
     if multicurrency_mode:
-        # convert each currency sum to base_currency using rates
-        for cur, amt in kpis["sums_per_currency"].items():
-            # if cur is None or nan, assume base
-            cur_code = cur or "USD"
-            converted = convert_to_base(amt, cur_code, rates, base=base_currency)
-            converted_totals[cur_code] = converted
-        # show converted totals
-        st.markdown(f"### Totals converted to {base_currency}")
-        st.table(pd.DataFrame(list(converted_totals.items()), columns=[ "Currency", f"Total in {base_currency}" ]))
+        sums = st.session_state.kpis.get("sums_per_currency", {})
+        converted = {}
+        for cur, amt in sums.items():
+            # convert to USD then to base_currency
+            rate_cur = rates.get(cur, default_rates.get(cur, 1.0))
+            usd_value = amt * rate_cur
+            # convert USD -> base
+            if base_currency == "USD":
+                converted[cur] = usd_value
+            else:
+                rate_base = rates.get(base_currency, default_rates.get(base_currency, 1.0))
+                converted[cur] = usd_value / rate_base
+        combined_total = sum(converted.values())
+        st.markdown(f"**Combined total in {base_currency}:** {combined_total:,.2f}")
 
-        # also show combined total in base currency
-        combined_total = sum(converted_totals.values())
-        st.metric(f"Combined Total ({base_currency})", f"{combined_total:,.2f}")
+    # Generate PDF and offer download
+    if st.button("Generate PDF (Preview & download)"):
+        try:
+            pdf_bytes = generate_pdf(st.session_state.ai_text, st.session_state.kpis, st.session_state.charts, display_currency_symbol=detect_currency_symbol(st.session_state.df))
+            st.session_state.pdf_bytes = pdf_bytes  # store
+            st.download_button("📄 Download PDF Report", pdf_bytes, f"SAPAutomatz_Report_{datetime.date.today()}.pdf", "application/pdf")
+            st.success("PDF generated and ready for download.")
+        except Exception as e:
+            st.error(f"PDF generation error: {e}")
 
-    # prepare AI prompt
-    currency_summary_str = ", ".join([f"{c}: {v:,.2f}" for c,v in kpis["sums_per_currency"].items()])
-    ai_prompt = build_prompt_for_ai(kpis, currency_summary_str)
-    ai_text = get_ai_summary(ai_prompt)
-
-    st.markdown("### AI Executive Summary (preview)")
-    st.write(ai_text)
-
-    # Generate PDF (include converted totals if multicurrency)
-    if st.button("Generate Executive PDF Report"):
-        # ensure font files available
-        if not os.path.exists(FONT_PATH) or not os.path.exists(FONT_PATH_BOLD):
-            st.warning("DejaVu fonts not found at expected path. For Windows, place DejaVuSans.ttf and DejaVuSans-Bold.ttf into ./fonts/. For Linux use system fonts path.")
-        pdf_bytes = generate_pdf_with_multicurrency(ai_text, kpis, chart_paths, base_currency, rates, converted_totals)
-        st.download_button("📄 Download PDF Report", pdf_bytes, f"SAPAutomatz_Report_{datetime.date.today()}.pdf", "application/pdf")
-
-    st.success("Analysis complete.")
+    # Send email (optional)
+    if MAILERSEND_API_KEY:
+        st.markdown("---")
+        st.markdown("### Email delivery")
+        to_email = st.text_input("Recipient email", value=recipient_email)
+        email_subject = st.text_input("Email subject", value=f"SAPAutomatz Report - {datetime.date.today()}")
+        email_body = st.text_area("Email body (plain text)", value="Please find the attached procurement analytics report.")
+        if st.button("Send PDF by email"):
+            if "pdf_bytes" not in st.session_state:
+                st.error("Please generate the PDF first (click 'Generate PDF' above).")
+            else:
+                try:
+                    resp = send_pdf_via_mailersend(MAILERSEND_API_KEY, sender_email, sender_name, to_email, email_subject, email_body, st.session_state.pdf_bytes, filename=f"SAPAutomatz_Report_{datetime.date.today()}.pdf")
+                    if resp.status_code in (200,201,202):
+                        st.success("✅ Email sent successfully.")
+                    else:
+                        st.error(f"Email failed: {resp.status_code} - {resp.text}")
+                except Exception as e:
+                    st.error(f"Email error: {e}")
+    else:
+        st.info("MailerSend API key not configured in environment. Skipping email delivery option.")
 
 else:
-    st.info("Upload a SAP PO/GRN CSV or XLSX file to analyze. Use the test generator script (below) to create a sample dataset with mixed currencies.")
+    st.info("Upload a SAP PO/GRN CSV or XLSX to analyze. After upload you'll be able to generate PDF, download, regenerate AI insights, and optionally email the PDF.")
 
-# -----------------------
+# -------------------------
 # End of file
-# -----------------------
+# -------------------------
