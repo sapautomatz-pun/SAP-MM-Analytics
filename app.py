@@ -1,10 +1,9 @@
 # ==============================================
-# SAP Automatz – Procurement Analytics (v3.8)
+# SAP Automatz – Procurement Analytics (v4.0)
 # ==============================================
-# • Updated for Streamlit 2025 (no warnings)
-# • Secure Access Verification via backend
-# • Dynamic banner showing days left till expiry
-# • Built-in Renew Access CTA
+# • Branded version with new logo and tagline
+# • Updated Streamlit syntax (no warnings)
+# • Dynamic expiry banner + Renew CTA
 # ==============================================
 
 import streamlit as st
@@ -15,9 +14,10 @@ import datetime
 # Configuration
 # ---------------------------------------------------------------------
 BACKEND_VERIFY_URL = "https://sapautomatz-backend.onrender.com/verify_access"
-RENEW_URL = "https://rzp.io/l/sapautomatz"   # Razorpay renewal link
+RENEW_URL = "https://rzp.io/l/sapautomatz"
+LOGO_URL = "https://sapautomatz.github.io/assets/logo.png"  # ✅ Replace with your uploaded logo URL
 
-st.set_page_config(page_title="SAP MM Procurement Analytics",
+st.set_page_config(page_title="SAP Automatz - Procurement Analytics",
                    page_icon="📊", layout="wide")
 
 # ---------------------------------------------------------------------
@@ -32,12 +32,10 @@ def check_access(key: str):
         return {"status": "error", "message": str(e)}
 
 def show_renew_button(label="🔁 Renew Access"):
-    """Render a consistent Renew Access button."""
+    """Reusable Renew Access button."""
     st.markdown(
         f"""
-        <a href="{RENEW_URL}" target="_blank" style="
-            text-decoration:none;
-            ">
+        <a href="{RENEW_URL}" target="_blank" style="text-decoration:none;">
             <button style="
                 background-color:#007bff;
                 color:white;
@@ -55,10 +53,10 @@ def show_renew_button(label="🔁 Renew Access"):
     )
 
 # ---------------------------------------------------------------------
-# Banner Renderer
+# Expiry Banner
 # ---------------------------------------------------------------------
 def show_banner(user):
-    """Display a colored banner with expiry info."""
+    """Display expiry info banner with color and CTA."""
     expiry = user.get("expiry")
     plan = user.get("plan", "").capitalize()
     if expiry == "Lifetime":
@@ -75,11 +73,11 @@ def show_banner(user):
         days_left = (expiry_date - today).days
 
         if days_left > 10:
-            color = "#28a745"  # Green
+            color = "#28a745"
         elif 4 <= days_left <= 10:
-            color = "#ff9800"  # Orange
+            color = "#ff9800"
         else:
-            color = "#dc3545"  # Red
+            color = "#dc3545"
 
         banner_text = f"⏳ Your {plan} plan expires in {days_left} day{'s' if days_left != 1 else ''} (on {expiry})."
         if days_left <= 3:
@@ -144,10 +142,10 @@ def show_access_form():
         st.caption("You'll receive your access key by email after payment.")
 
 # ---------------------------------------------------------------------
-# Dashboard Logic
+# Dashboard
 # ---------------------------------------------------------------------
 def show_dashboard(user):
-    """Main dashboard after access verification."""
+    """Main analytics dashboard."""
     show_banner(user)
     st.title("📊 SAP MM Procurement Analytics")
     st.markdown(f"**Plan:** {user.get('plan').capitalize()} | **Valid till:** {user.get('expiry')}")
@@ -172,19 +170,20 @@ def show_dashboard(user):
         st.info("Please upload your SAP PO / GRN dataset to view analytics.")
 
     st.divider()
-    st.caption("© 2025 SAP Automatz | Powered by SAP GEN AI")
+    st.caption("© 2025 SAP Automatz | Automate. Analyze. Accelerate.")
 
 # ---------------------------------------------------------------------
 # Sidebar Branding
 # ---------------------------------------------------------------------
-st.sidebar.image(
-    "https://sapautomatz.github.io/SAP-MM-Reconciliation-tool/logo.png",
-    use_container_width=True
+st.sidebar.image(LOGO_URL, use_container_width=True)
+st.sidebar.markdown(
+    "<h3 style='text-align:center; color:#0A6ED1;'>SAP Automatz</h3>"
+    "<p style='text-align:center; color:gray;'>Automate. Analyze. Accelerate.</p>",
+    unsafe_allow_html=True
 )
-st.sidebar.markdown("### SAP Automatz\nAI-Driven Procurement Intelligence")
 
 # ---------------------------------------------------------------------
-# Main App Logic
+# App Logic
 # ---------------------------------------------------------------------
 if "verified" not in st.session_state or not st.session_state["verified"]:
     show_access_form()
