@@ -1,9 +1,9 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI (v27.6 FINAL BUILD)
+# SAP AUTOMATZ - Procurement Analytics AI (v27.7 FINAL PATCH)
 # ==========================================================
-# ✅ FIX: Chart plotting error (auto numeric clean)
-# ✅ FIX: PDF blank issue resolved
-# ✅ Includes Executive Summary, KPIs, Charts
+# ✅ FIX: TypeError on pdf.output(pdf_output)
+# ✅ FIX: UTF-8 text safe for fpdf v1.x
+# ✅ Full AI Insights + KPIs + Charts now print correctly
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, pandas as pd, numpy as np
@@ -95,7 +95,6 @@ def clean_numeric(series):
     )
 
 def calculate_kpis(df):
-    # Auto-detect numeric field
     num_cols = [c for c in df.columns if any(x in c.upper() for x in ["VALUE","AMOUNT","TOTAL","PRICE","COST"])]
     if not num_cols:
         df["AMOUNT"] = 0
@@ -123,7 +122,7 @@ Records: {k['records']}
 Total Spend: {k['total_spend']:,}
 Date Range: {k.get('date_range','N/A')}
 Top Vendor: {k.get('top_vendor','N/A')}
-Write 3 short paragraphs about performance, vendor dependency, and optimization opportunities."""
+Write 3 concise paragraphs about performance, vendor dependency, and opportunities."""
     try:
         r = client.chat.completions.create(
             model=MODEL,
@@ -173,7 +172,6 @@ def generate_pdf(ai_text, k, charts, customer, key):
     pdf.cell(0,10,"Executive Summary",ln=True)
     pdf.ln(4)
     pdf.set_font("DejaVu","",11)
-
     ai_text = sanitize_text(ai_text)
     if not ai_text or ai_text.startswith("AI Error"):
         pdf.multi_cell(0,8,"No AI summary generated. Please check your API key or connection.")
@@ -202,20 +200,18 @@ def generate_pdf(ai_text, k, charts, customer, key):
             except:
                 pdf.multi_cell(0,6,"Chart unavailable.")
 
-    pdf_output = io.BytesIO()
-    pdf.output(pdf_output)
-    pdf_output.seek(0)
-    return pdf_output
+    # --- RETURN STREAM (COMPATIBLE WITH FPDF 1.x) ---
+    pdf_bytes = pdf.output(dest="S").encode("latin-1", "ignore")
+    return io.BytesIO(pdf_bytes)
 
 # -------------------------
 # MAIN APP
 # -------------------------
-st.title("📊 Procurement Analytics Dashboard (v27.6)")
+st.title("📊 Procurement Analytics Dashboard (v27.7)")
 file = st.file_uploader("📂 Upload SAP Procurement Data", type=["csv","xlsx"])
 
 if file:
     df = pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
-
     k = calculate_kpis(df)
 
     charts=[]
