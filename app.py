@@ -1,9 +1,9 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI (v27.5 FINAL STABLE)
+# SAP AUTOMATZ - Procurement Analytics AI (v27.6 FINAL BUILD)
 # ==========================================================
-# ✅ FIX: Empty PDF issue resolved (writes directly to BytesIO)
-# ✅ UTF-8 fonts preserved
-# ✅ Full Executive Summary + KPIs + Charts in PDF
+# ✅ FIX: Chart plotting error (auto numeric clean)
+# ✅ FIX: PDF blank issue resolved
+# ✅ Includes Executive Summary, KPIs, Charts
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, pandas as pd, numpy as np
@@ -84,15 +84,30 @@ def sanitize_text(text):
     text = re.sub(r"[^\x09\x0A\x0D\x20-\x7E]", "", text)
     return text.strip()
 
+def clean_numeric(series):
+    """Convert mixed currency/strings to numeric"""
+    return (
+        series.astype(str)
+        .replace(r"[^\d.\-]", "", regex=True)
+        .replace("", np.nan)
+        .astype(float)
+        .fillna(0)
+    )
+
 def calculate_kpis(df):
-    df["AMOUNT"] = pd.to_numeric(df.get("VALUE", 0), errors="coerce").fillna(0)
+    # Auto-detect numeric field
+    num_cols = [c for c in df.columns if any(x in c.upper() for x in ["VALUE","AMOUNT","TOTAL","PRICE","COST"])]
+    if not num_cols:
+        df["AMOUNT"] = 0
+    else:
+        df["AMOUNT"] = clean_numeric(df[num_cols[0]])
     df["CURRENCY_DETECTED"] = "INR"
     kpis = {
         "records": len(df),
         "total_spend": float(df["AMOUNT"].sum()),
     }
     if "PO_DATE" in df.columns:
-        start, end = df["PO_DATE"].min(), df["PO_DATE"].max()
+        start, end = pd.to_datetime(df["PO_DATE"], errors="coerce").min(), pd.to_datetime(df["PO_DATE"], errors="coerce").max()
         if pd.notna(start) and pd.notna(end):
             kpis["date_range"] = f"{start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}"
     if "VENDOR" in df.columns:
@@ -108,11 +123,11 @@ Records: {k['records']}
 Total Spend: {k['total_spend']:,}
 Date Range: {k.get('date_range','N/A')}
 Top Vendor: {k.get('top_vendor','N/A')}
-Write 3 professional paragraphs explaining trends, vendor dependency, and improvement opportunities."""
+Write 3 short paragraphs about performance, vendor dependency, and optimization opportunities."""
     try:
         r = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role": "system", "content": "You are a SAP procurement analyst summarizing business performance."},
+            messages=[{"role": "system", "content": "You are a SAP procurement analyst writing concise business insights."},
                       {"role": "user", "content": prompt}],
             temperature=0.3, max_tokens=500)
         return sanitize_text(r.choices[0].message.content)
@@ -187,7 +202,6 @@ def generate_pdf(ai_text, k, charts, customer, key):
             except:
                 pdf.multi_cell(0,6,"Chart unavailable.")
 
-    # --- RETURN BYTESIO STREAM ---
     pdf_output = io.BytesIO()
     pdf.output(pdf_output)
     pdf_output.seek(0)
@@ -196,34 +210,37 @@ def generate_pdf(ai_text, k, charts, customer, key):
 # -------------------------
 # MAIN APP
 # -------------------------
-st.title("📊 Procurement Analytics Dashboard (v27.5)")
+st.title("📊 Procurement Analytics Dashboard (v27.6)")
 file = st.file_uploader("📂 Upload SAP Procurement Data", type=["csv","xlsx"])
 
 if file:
     df = pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
-    df["PO_DATE"] = pd.to_datetime(df.get("PO_DATE"), errors="coerce")
+
     k = calculate_kpis(df)
 
-    # Charts
     charts=[]
     st.subheader("🏢 Vendor Spend Overview")
-    if "VENDOR" in df.columns:
-        vendor=df.groupby("VENDOR")["VALUE"].sum().sort_values(ascending=False).head(10)
-        fig,ax=plt.subplots(figsize=(8,4))
-        vendor.plot(kind="bar",ax=ax,color="#2E86C1")
+    if "VENDOR" in df.columns and "AMOUNT" in df.columns:
+        vendor = df.groupby("VENDOR")["AMOUNT"].sum().sort_values(ascending=False).head(10)
+        fig, ax = plt.subplots(figsize=(8,4))
+        vendor.plot(kind="bar", ax=ax, color="#2E86C1")
         ax.set_ylabel("Spend")
         ax.set_title("Top 10 Vendors by Spend")
-        vendor_chart="vendor_chart.png"; fig.tight_layout(); fig.savefig(vendor_chart)
+        vendor_chart = "vendor_chart.png"
+        fig.tight_layout()
+        fig.savefig(vendor_chart)
         charts.append(vendor_chart)
         st.pyplot(fig)
 
     st.subheader("📦 Material Spend Distribution")
-    if "MATERIAL" in df.columns:
-        mat=df.groupby("MATERIAL")["VALUE"].sum().sort_values(ascending=False).head(10)
-        fig2,ax2=plt.subplots(figsize=(6,6))
-        ax2.pie(mat,labels=mat.index,autopct='%1.1f%%',startangle=90)
+    if "MATERIAL" in df.columns and "AMOUNT" in df.columns:
+        mat = df.groupby("MATERIAL")["AMOUNT"].sum().sort_values(ascending=False).head(10)
+        fig2, ax2 = plt.subplots(figsize=(6,6))
+        ax2.pie(mat, labels=mat.index, autopct='%1.1f%%', startangle=90)
         ax2.set_title("Top 10 Materials by Spend")
-        mat_chart="material_chart.png"; fig2.tight_layout(); fig2.savefig(mat_chart)
+        mat_chart = "material_chart.png"
+        fig2.tight_layout()
+        fig2.savefig(mat_chart)
         charts.append(mat_chart)
         st.pyplot(fig2)
 
