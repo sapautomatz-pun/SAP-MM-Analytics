@@ -26,7 +26,7 @@ st.set_page_config(page_title="SAP Automatz - Procurement Analytics",
 def check_access(key: str):
     """Query backend to verify access key."""
     try:
-        res = requests.get(BACKEND_VERIFY_URL, params={"key": key}, timeout=10)
+        res = requests.get(BACKEND_VERIFY_URL, params={"key": key}, timeout=25)
         return res.json()
     except Exception as e:
         return {"status": "error", "message": str(e)}
