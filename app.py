@@ -1,10 +1,9 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI (v27.4 FINAL)
+# SAP AUTOMATZ - Procurement Analytics AI (v27.5 FINAL STABLE)
 # ==========================================================
-# ✅ Full AI insights now included in PDF
-# ✅ UTF-8 PDF output (no text loss)
-# ✅ Auto-wrap long AI summaries
-# ✅ Clean multipage layout
+# ✅ FIX: Empty PDF issue resolved (writes directly to BytesIO)
+# ✅ UTF-8 fonts preserved
+# ✅ Full Executive Summary + KPIs + Charts in PDF
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, pandas as pd, numpy as np
@@ -24,7 +23,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = "gpt-4o-mini"
 LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png"
 
-# Fonts (DejaVu for PDF)
+# Fonts
 if platform.system() == "Windows":
     FONT_PATH = "./fonts/DejaVuSans.ttf"
     FONT_PATH_BOLD = "./fonts/DejaVuSans-Bold.ttf"
@@ -78,28 +77,6 @@ if not st.session_state.verified:
 # -------------------------
 # HELPERS
 # -------------------------
-CURRENCY_SYMBOLS = {"₹":"INR", "$":"USD", "€":"EUR", "£":"GBP", "¥":"JPY"}
-
-def normalize_columns(df):
-    df = df.rename(columns=lambda x: str(x).strip().upper())
-    mapping = {"PO NO":"PO_NUMBER","PURCHASE ORDER":"PO_NUMBER","PO_DATE":"PO_DATE","GRN_DATE":"GRN_DATE",
-               "VENDOR":"VENDOR","SUPPLIER":"VENDOR","MATERIAL":"MATERIAL","QUANTITY":"QUANTITY",
-               "VALUE":"VALUE","AMOUNT":"VALUE","CURRENCY":"CURRENCY"}
-    for k,v in mapping.items():
-        for col in df.columns:
-            if k in col:
-                df.rename(columns={col:v}, inplace=True)
-    return df
-
-def coerce_types(df):
-    if "PO_DATE" in df.columns:
-        df["PO_DATE"] = pd.to_datetime(df["PO_DATE"], errors="coerce")
-    if "GRN_DATE" in df.columns:
-        df["GRN_DATE"] = pd.to_datetime(df["GRN_DATE"], errors="coerce")
-    if "QUANTITY" in df.columns:
-        df["QUANTITY"] = pd.to_numeric(df["QUANTITY"], errors="coerce")
-    return df
-
 def sanitize_text(text):
     if text is None:
         return ""
@@ -112,45 +89,32 @@ def calculate_kpis(df):
     df["CURRENCY_DETECTED"] = "INR"
     kpis = {
         "records": len(df),
-        "sums_per_currency": df.groupby("CURRENCY_DETECTED")["AMOUNT"].sum().to_dict(),
-        "total_spend_raw": float(np.nansum(df["AMOUNT"]))
+        "total_spend": float(df["AMOUNT"].sum()),
     }
     if "PO_DATE" in df.columns:
         start, end = df["PO_DATE"].min(), df["PO_DATE"].max()
         if pd.notna(start) and pd.notna(end):
             kpis["date_range"] = f"{start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}"
-        else:
-            kpis["date_range"] = "N/A"
-    else:
-        kpis["date_range"] = "N/A"
-
     if "VENDOR" in df.columns:
         try:
             kpis["top_vendor"] = df.groupby("VENDOR")["AMOUNT"].sum().idxmax()
         except:
             kpis["top_vendor"] = "N/A"
-    else:
-        kpis["top_vendor"] = "N/A"
-
-    return df, kpis
+    return kpis
 
 def ai_summary(k):
-    prompt = f"""Generate an executive summary for this procurement dataset:
+    prompt = f"""Summarize SAP procurement insights for:
 Records: {k['records']}
-Total spend by currency: {k['sums_per_currency']}
-Date Range: {k['date_range']}
-Top Vendor: {k['top_vendor']}
-Provide 3 concise paragraphs summarizing procurement efficiency, vendor concentration, and optimization recommendations."""
+Total Spend: {k['total_spend']:,}
+Date Range: {k.get('date_range','N/A')}
+Top Vendor: {k.get('top_vendor','N/A')}
+Write 3 professional paragraphs explaining trends, vendor dependency, and improvement opportunities."""
     try:
         r = client.chat.completions.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": "You are a SAP Procurement Analyst writing concise, professional summaries."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.4,
-            max_tokens=500
-        )
+            messages=[{"role": "system", "content": "You are a SAP procurement analyst summarizing business performance."},
+                      {"role": "user", "content": prompt}],
+            temperature=0.3, max_tokens=500)
         return sanitize_text(r.choices[0].message.content)
     except Exception as e:
         return f"AI Error: {e}"
@@ -162,11 +126,16 @@ class PDF(FPDF):
     def header(self): pass
     def footer(self):
         self.set_y(-15)
-        self.set_font("DejaVu","",9)
+        self.set_font("DejaVu", "", 9)
         self.set_text_color(130,130,130)
         self.cell(0,10,"© 2025 SAP Automatz – Powered by Gen AI",align="C")
 
-def add_cover(pdf, customer, key):
+def generate_pdf(ai_text, k, charts, customer, key):
+    pdf = PDF()
+    pdf.add_font("DejaVu","",FONT_PATH,uni=True)
+    pdf.add_font("DejaVu","B",FONT_PATH_BOLD,uni=True)
+
+    # --- COVER PAGE ---
     pdf.add_page()
     pdf.set_fill_color(33,86,145)
     pdf.rect(0,0,210,297,'F')
@@ -182,36 +151,32 @@ def add_cover(pdf, customer, key):
     pdf.cell(0,10,f"Access Key: {key}",align="C",ln=True)
     pdf.cell(0,10,f"Date: {datetime.date.today().strftime('%d %b %Y')}",align="C",ln=True)
 
-def generate_pdf(ai_text,k,charts,customer,key):
-    pdf=PDF()
-    pdf.add_font("DejaVu","",FONT_PATH,uni=True)
-    pdf.add_font("DejaVu","B",FONT_PATH_BOLD,uni=True)
-    add_cover(pdf,customer,key)
-
-    # --- Executive Summary ---
+    # --- EXECUTIVE SUMMARY ---
     pdf.add_page()
+    pdf.set_text_color(0,0,0)
     pdf.set_font("DejaVu","B",14)
     pdf.cell(0,10,"Executive Summary",ln=True)
-    pdf.ln(5)
+    pdf.ln(4)
     pdf.set_font("DejaVu","",11)
 
-    if ai_text.strip() == "" or ai_text.lower().startswith("ai error"):
-        pdf.multi_cell(0,8,"No AI summary generated. Please verify your OpenAI API key.")
+    ai_text = sanitize_text(ai_text)
+    if not ai_text or ai_text.startswith("AI Error"):
+        pdf.multi_cell(0,8,"No AI summary generated. Please check your API key or connection.")
     else:
-        for para in ai_text.split("\n"):
-            if para.strip():
-                pdf.multi_cell(0,7,sanitize_text(para))
+        for line in ai_text.split("\n"):
+            if line.strip():
+                pdf.multi_cell(0,7,line)
                 pdf.ln(2)
 
     # --- KPIs ---
-    pdf.ln(5)
+    pdf.ln(6)
     pdf.set_font("DejaVu","B",12)
     pdf.cell(0,8,"Key Performance Indicators",ln=True)
     pdf.set_font("DejaVu","",11)
     for kx,v in k.items():
         pdf.multi_cell(0,6,f"{kx}: {v}")
 
-    # --- Charts ---
+    # --- CHARTS ---
     for path in charts:
         if path and os.path.exists(path):
             pdf.add_page()
@@ -222,39 +187,49 @@ def generate_pdf(ai_text,k,charts,customer,key):
             except:
                 pdf.multi_cell(0,6,"Chart unavailable.")
 
-    return io.BytesIO(pdf.output(dest="S").encode("utf-8"))
+    # --- RETURN BYTESIO STREAM ---
+    pdf_output = io.BytesIO()
+    pdf.output(pdf_output)
+    pdf_output.seek(0)
+    return pdf_output
 
 # -------------------------
 # MAIN APP
 # -------------------------
-st.title("📊 Procurement Analytics Dashboard (v27.4)")
-file=st.file_uploader("📂 Upload SAP Procurement Data",type=["csv","xlsx"])
+st.title("📊 Procurement Analytics Dashboard (v27.5)")
+file = st.file_uploader("📂 Upload SAP Procurement Data", type=["csv","xlsx"])
 
 if file:
-    df=pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
-    df=normalize_columns(coerce_types(df))
-    df,k=calculate_kpis(df)
+    df = pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
+    df["PO_DATE"] = pd.to_datetime(df.get("PO_DATE"), errors="coerce")
+    k = calculate_kpis(df)
 
+    # Charts
     charts=[]
     st.subheader("🏢 Vendor Spend Overview")
-    vendor=df.groupby("VENDOR")["AMOUNT"].sum().sort_values(ascending=False).head(10)
-    fig,ax=plt.subplots(figsize=(8,4))
-    vendor.plot(kind="bar",ax=ax,color="#2E86C1")
-    ax.set_ylabel("Spend"); ax.set_title("Top 10 Vendors by Spend")
-    vchart="vendor_chart.png"; fig.tight_layout(); fig.savefig(vchart)
-    charts.append(vchart); st.pyplot(fig)
+    if "VENDOR" in df.columns:
+        vendor=df.groupby("VENDOR")["VALUE"].sum().sort_values(ascending=False).head(10)
+        fig,ax=plt.subplots(figsize=(8,4))
+        vendor.plot(kind="bar",ax=ax,color="#2E86C1")
+        ax.set_ylabel("Spend")
+        ax.set_title("Top 10 Vendors by Spend")
+        vendor_chart="vendor_chart.png"; fig.tight_layout(); fig.savefig(vendor_chart)
+        charts.append(vendor_chart)
+        st.pyplot(fig)
 
     st.subheader("📦 Material Spend Distribution")
-    mat=df.groupby("MATERIAL")["AMOUNT"].sum().sort_values(ascending=False).head(10)
-    fig2,ax2=plt.subplots(figsize=(6,6))
-    ax2.pie(mat,labels=mat.index,autopct='%1.1f%%',startangle=90)
-    ax2.set_title("Top 10 Materials by Spend")
-    mchart="material_chart.png"; fig2.tight_layout(); fig2.savefig(mchart)
-    charts.append(mchart); st.pyplot(fig2)
+    if "MATERIAL" in df.columns:
+        mat=df.groupby("MATERIAL")["VALUE"].sum().sort_values(ascending=False).head(10)
+        fig2,ax2=plt.subplots(figsize=(6,6))
+        ax2.pie(mat,labels=mat.index,autopct='%1.1f%%',startangle=90)
+        ax2.set_title("Top 10 Materials by Spend")
+        mat_chart="material_chart.png"; fig2.tight_layout(); fig2.savefig(mat_chart)
+        charts.append(mat_chart)
+        st.pyplot(fig2)
 
-    ai_text=ai_summary(k)
+    ai_text = ai_summary(k)
     st.subheader("AI Insights Summary")
     st.markdown(ai_text)
 
-    pdf_bytes=generate_pdf(ai_text,k,charts,"ABC Manufacturing Pvt Ltd",st.session_state.access_key)
-    st.download_button("📄 Download Full Report PDF",pdf_bytes,f"SAP_Report_{datetime.date.today()}.pdf","application/pdf")
+    pdf_bytes = generate_pdf(ai_text, k, charts, "ABC Manufacturing Pvt Ltd", st.session_state.access_key)
+    st.download_button("📄 Download Full Report PDF", pdf_bytes, f"SAP_Report_{datetime.date.today()}.pdf", "application/pdf")
