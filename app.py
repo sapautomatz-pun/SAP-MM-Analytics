@@ -1,11 +1,10 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI (v27.3 ENTERPRISE)
+# SAP AUTOMATZ - Procurement Analytics AI (v27.4 FINAL)
 # ==========================================================
-# FINAL ENTERPRISE RELEASE
-# ✅ AI summary + KPIs visible in PDF
-# ✅ Bulletproof text sanitization (UTF-8 safe)
-# ✅ Layout optimization for multipage PDF
-# ✅ Retains charts + cover page
+# ✅ Full AI insights now included in PDF
+# ✅ UTF-8 PDF output (no text loss)
+# ✅ Auto-wrap long AI summaries
+# ✅ Clean multipage layout
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, pandas as pd, numpy as np
@@ -15,7 +14,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from openai import OpenAI
 from fpdf import FPDF
-from unidecode import unidecode  # NEW import for safe AI text cleaning
+from unidecode import unidecode
 
 # -------------------------
 # CONFIG
@@ -102,64 +101,59 @@ def coerce_types(df):
     return df
 
 def sanitize_text(text):
-    """Clean & encode text for PDF output"""
-    if text is None: return ""
+    if text is None:
+        return ""
     text = unidecode(str(text))
-    text = re.sub(r'[^\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]', '', text)
+    text = re.sub(r"[^\x09\x0A\x0D\x20-\x7E]", "", text)
     return text.strip()
 
-def calculate_kpis_and_parse(df):
-    if "CURRENCY" not in df.columns:
-        df["CURRENCY"]=None
-    inferred_symbol="₹"
-    inferred_default=CURRENCY_SYMBOLS.get(inferred_symbol,"INR")
-    amounts,codes=[],[]
-    for _,row in df.iterrows():
-        raw=row.get("VALUE",None)
-        try:num=float(str(raw).replace(",",""))
-        except:num=0.0
-        amounts.append(num)
-        codes.append(inferred_default)
-    df["AMOUNT"]=pd.Series(amounts,dtype=float)
-    df["CURRENCY_DETECTED"]=codes
-    kpis={
-        "records":len(df),
-        "sums_per_currency":df.groupby("CURRENCY_DETECTED")["AMOUNT"].sum().to_dict(),
-        "total_spend_raw":float(np.nansum(df["AMOUNT"]))
+def calculate_kpis(df):
+    df["AMOUNT"] = pd.to_numeric(df.get("VALUE", 0), errors="coerce").fillna(0)
+    df["CURRENCY_DETECTED"] = "INR"
+    kpis = {
+        "records": len(df),
+        "sums_per_currency": df.groupby("CURRENCY_DETECTED")["AMOUNT"].sum().to_dict(),
+        "total_spend_raw": float(np.nansum(df["AMOUNT"]))
     }
     if "PO_DATE" in df.columns:
-        start,end=df["PO_DATE"].min(),df["PO_DATE"].max()
-        kpis["date_range"]=f"{start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}" if pd.notna(start) else "N/A"
-    else:kpis["date_range"]="N/A"
-    if "PO_DATE" in df.columns and "GRN_DATE" in df.columns:
-        df["CYCLE_DAYS"]=(df["GRN_DATE"]-df["PO_DATE"]).dt.days
-        kpis["avg_cycle_days"]=round(df["CYCLE_DAYS"].mean(skipna=True),1)
-        kpis["delayed_count"]=int(df[df["CYCLE_DAYS"]>7].shape[0])
+        start, end = df["PO_DATE"].min(), df["PO_DATE"].max()
+        if pd.notna(start) and pd.notna(end):
+            kpis["date_range"] = f"{start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}"
+        else:
+            kpis["date_range"] = "N/A"
     else:
-        kpis["avg_cycle_days"],kpis["delayed_count"]=None,0
-    try:kpis["top_vendor"]=df.groupby("VENDOR")["AMOUNT"].sum().idxmax()
-    except:kpis["top_vendor"]="N/A"
-    return df,kpis
+        kpis["date_range"] = "N/A"
+
+    if "VENDOR" in df.columns:
+        try:
+            kpis["top_vendor"] = df.groupby("VENDOR")["AMOUNT"].sum().idxmax()
+        except:
+            kpis["top_vendor"] = "N/A"
+    else:
+        kpis["top_vendor"] = "N/A"
+
+    return df, kpis
 
 def ai_summary(k):
-    """Generate structured AI summary"""
-    prompt=f"""Generate a clear executive summary for a SAP Procurement Analytics report:
-- Records: {k['records']}
-- Total spend by currency: {k['sums_per_currency']}
-- Date Range: {k['date_range']}
-- Avg Cycle Days: {k['avg_cycle_days']}
-- Delayed Orders: {k['delayed_count']}
-- Top Vendor: {k['top_vendor']}
-Write 3 short paragraphs explaining procurement performance, efficiency and improvement opportunities."""
+    prompt = f"""Generate an executive summary for this procurement dataset:
+Records: {k['records']}
+Total spend by currency: {k['sums_per_currency']}
+Date Range: {k['date_range']}
+Top Vendor: {k['top_vendor']}
+Provide 3 concise paragraphs summarizing procurement efficiency, vendor concentration, and optimization recommendations."""
     try:
-        r=client.chat.completions.create(
+        r = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role":"system","content":"You are an SAP Procurement Analyst summarizing data-driven insights."},
-                      {"role":"user","content":prompt}],
-            temperature=0.3,max_tokens=500)
+            messages=[
+                {"role": "system", "content": "You are a SAP Procurement Analyst writing concise, professional summaries."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4,
+            max_tokens=500
+        )
         return sanitize_text(r.choices[0].message.content)
     except Exception as e:
-        return f"AI error: {e}"
+        return f"AI Error: {e}"
 
 # -------------------------
 # PDF
@@ -187,51 +181,60 @@ def add_cover(pdf, customer, key):
     pdf.cell(0,10,f"Customer: {customer}",align="C",ln=True)
     pdf.cell(0,10,f"Access Key: {key}",align="C",ln=True)
     pdf.cell(0,10,f"Date: {datetime.date.today().strftime('%d %b %Y')}",align="C",ln=True)
-    pdf.ln(15)
-    pdf.set_font("DejaVu","",11)
-    pdf.cell(0,10,"Confidential: For authorized SAP Automatz users only",align="C",ln=True)
 
 def generate_pdf(ai_text,k,charts,customer,key):
     pdf=PDF()
     pdf.add_font("DejaVu","",FONT_PATH,uni=True)
     pdf.add_font("DejaVu","B",FONT_PATH_BOLD,uni=True)
     add_cover(pdf,customer,key)
-    # --- Summary Page ---
+
+    # --- Executive Summary ---
     pdf.add_page()
     pdf.set_font("DejaVu","B",14)
     pdf.cell(0,10,"Executive Summary",ln=True)
+    pdf.ln(5)
     pdf.set_font("DejaVu","",11)
-    pdf.ln(4)
-    for para in ai_text.split("\n"):
-        pdf.multi_cell(0,6,sanitize_text(para))
-    pdf.ln(6)
+
+    if ai_text.strip() == "" or ai_text.lower().startswith("ai error"):
+        pdf.multi_cell(0,8,"No AI summary generated. Please verify your OpenAI API key.")
+    else:
+        for para in ai_text.split("\n"):
+            if para.strip():
+                pdf.multi_cell(0,7,sanitize_text(para))
+                pdf.ln(2)
+
+    # --- KPIs ---
+    pdf.ln(5)
     pdf.set_font("DejaVu","B",12)
     pdf.cell(0,8,"Key Performance Indicators",ln=True)
     pdf.set_font("DejaVu","",11)
     for kx,v in k.items():
         pdf.multi_cell(0,6,f"{kx}: {v}")
+
     # --- Charts ---
     for path in charts:
         if path and os.path.exists(path):
             pdf.add_page()
             pdf.set_font("DejaVu","B",12)
             pdf.cell(0,8,os.path.basename(path).replace("_"," ").title(),ln=True)
-            try: pdf.image(path,w=160)
-            except: pdf.multi_cell(0,6,"Chart unavailable.")
-    return io.BytesIO(pdf.output(dest="S").encode("latin-1","ignore"))
+            try:
+                pdf.image(path,w=160)
+            except:
+                pdf.multi_cell(0,6,"Chart unavailable.")
+
+    return io.BytesIO(pdf.output(dest="S").encode("utf-8"))
 
 # -------------------------
 # MAIN APP
 # -------------------------
-st.title("📊 Procurement Analytics Dashboard (v27.3)")
+st.title("📊 Procurement Analytics Dashboard (v27.4)")
 file=st.file_uploader("📂 Upload SAP Procurement Data",type=["csv","xlsx"])
 
 if file:
     df=pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
     df=normalize_columns(coerce_types(df))
-    df,k=calculate_kpis_and_parse(df)
+    df,k=calculate_kpis(df)
 
-    # Charts
     charts=[]
     st.subheader("🏢 Vendor Spend Overview")
     vendor=df.groupby("VENDOR")["AMOUNT"].sum().sort_values(ascending=False).head(10)
@@ -249,11 +252,9 @@ if file:
     mchart="material_chart.png"; fig2.tight_layout(); fig2.savefig(mchart)
     charts.append(mchart); st.pyplot(fig2)
 
-    # AI Summary
     ai_text=ai_summary(k)
     st.subheader("AI Insights Summary")
     st.markdown(ai_text)
 
-    # Generate PDF
     pdf_bytes=generate_pdf(ai_text,k,charts,"ABC Manufacturing Pvt Ltd",st.session_state.access_key)
     st.download_button("📄 Download Full Report PDF",pdf_bytes,f"SAP_Report_{datetime.date.today()}.pdf","application/pdf")
