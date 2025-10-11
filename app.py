@@ -1,11 +1,12 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI App (v17.0)
+# SAP AUTOMATZ - Procurement Analytics AI App (v19.0)
 # ==========================================================
 # Features:
-#  ✅ Secure Access Key Verification + Remember Me
-#  ✅ Branded Header (always visible)
-#  ✅ GPT-4o Insights, PDF Reports
-#  ✅ Airtable Storage + Customer Report Portal
+#  ✅ AI Summary with Executive Report Page
+#  ✅ GPT-4o Analytics + Charts
+#  ✅ Safe PDF Output (no FPDF errors)
+#  ✅ Airtable Report Portal
+#  ✅ Branded Header + Remember Me Access
 # ==========================================================
 
 import os
@@ -27,7 +28,6 @@ from fpdf import FPDF
 # ----------------------------------------------------------
 BACKEND_URL = "https://sapautomatz-backend.onrender.com"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Reports")
@@ -45,7 +45,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ----------------------------------------------------------
 st.set_page_config(page_title="SAP Automatz - Procurement Analytics AI", page_icon="📊", layout="wide")
 
-# CSS Styling
 st.markdown("""
 <style>
 .main {background-color: #F6F9FC;}
@@ -71,14 +70,9 @@ st.divider()
 # ----------------------------------------------------------
 # SESSION STATE (Remember Me)
 # ----------------------------------------------------------
-if "access_verified" not in st.session_state:
-    st.session_state.access_verified = False
-if "customer_name" not in st.session_state:
-    st.session_state.customer_name = ""
-if "plan_type" not in st.session_state:
-    st.session_state.plan_type = ""
-if "expiry" not in st.session_state:
-    st.session_state.expiry = ""
+for key in ["access_verified", "customer_name", "plan_type", "expiry"]:
+    if key not in st.session_state:
+        st.session_state[key] = ""
 
 # ----------------------------------------------------------
 # ACCESS VERIFICATION
@@ -108,13 +102,12 @@ if not st.session_state.access_verified:
     st.stop()
 
 # ----------------------------------------------------------
-# POST-VERIFICATION DASHBOARD
+# SIDEBAR NAVIGATION
 # ----------------------------------------------------------
 st.sidebar.image(LOGO_URL, width=150)
 page = st.sidebar.radio("📘 Navigate", ["🔍 Analyze & Generate", "📬 My Reports Portal"])
 st.sidebar.caption("Automate. Analyze. Accelerate 🚀")
 
-# Display session details
 st.success(f"✅ Logged in as {st.session_state.customer_name} ({st.session_state.plan_type} plan, valid till {st.session_state.expiry})")
 
 # ----------------------------------------------------------
@@ -168,11 +161,12 @@ Total Spend: ₹{kpis['total_spend']:,}
 Average Cycle Time: {kpis['avg_cycle']} days
 Delayed Shipments: {kpis['delays']}
 Top Vendor: {kpis['top_vendor']}
-Provide concise insights under:
+Provide short, structured sections for:
 1️⃣ Executive Summary
-2️⃣ Root Causes
-3️⃣ Recommendations
-4️⃣ KPIs for next month
+2️⃣ Key Observations
+3️⃣ Root Causes
+4️⃣ Recommendations
+5️⃣ Next Month’s KPI Goals
 """
 
 def generate_ai_summary(prompt):
@@ -180,16 +174,56 @@ def generate_ai_summary(prompt):
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "You are a senior SAP procurement analyst."},
+                {"role": "system", "content": "You are a senior SAP procurement analyst preparing a professional executive summary."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=600
+            max_tokens=700
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"Error generating AI summary: {e}"
 
+# ----------------------------------------------------------
+# CHARTS
+# ----------------------------------------------------------
+def generate_charts(df):
+    chart_paths = {}
+    if "VENDOR" in df.columns and "VALUE" in df.columns:
+        top_vendors = df.groupby("VENDOR")["VALUE"].sum().sort_values(ascending=False).head(10)
+        plt.figure(figsize=(8,4))
+        top_vendors.plot(kind='bar', color='steelblue', title="Top 10 Vendors by Spend (₹)")
+        plt.ylabel("Spend (₹)")
+        plt.tight_layout()
+        path = "/tmp/vendor_chart.png"
+        plt.savefig(path)
+        chart_paths["Top Vendors"] = path
+        st.image(path, caption="Top Vendors by Spend")
+    if "MATERIAL" in df.columns and "VALUE" in df.columns:
+        material_spend = df.groupby("MATERIAL")["VALUE"].sum().sort_values(ascending=False).head(8)
+        plt.figure(figsize=(5,5))
+        plt.pie(material_spend, labels=material_spend.index, autopct="%1.1f%%")
+        plt.title("Material Spend Distribution")
+        path = "/tmp/material_chart.png"
+        plt.savefig(path)
+        chart_paths["Material Spend"] = path
+        st.image(path, caption="Material Spend Distribution")
+    if "PO_DATE" in df.columns and "VALUE" in df.columns:
+        df["MONTH"] = df["PO_DATE"].dt.to_period("M").astype(str)
+        monthly_spend = df.groupby("MONTH")["VALUE"].sum().sort_index()
+        plt.figure(figsize=(8,4))
+        monthly_spend.plot(marker='o', color='darkorange', title="Monthly Spend Trend")
+        plt.ylabel("Spend (₹)")
+        plt.tight_layout()
+        path = "/tmp/trend_chart.png"
+        plt.savefig(path)
+        chart_paths["Monthly Trend"] = path
+        st.image(path, caption="Monthly Spend Trend")
+    return chart_paths
+
+# ----------------------------------------------------------
+# PDF GENERATION (with Executive Summary Page)
+# ----------------------------------------------------------
 class BrandedPDF(FPDF):
     def header(self):
         self.set_fill_color(33, 86, 145)
@@ -205,30 +239,63 @@ class BrandedPDF(FPDF):
         self.set_text_color(130,130,130)
         self.cell(0, 10, "© 2025 SAP Automatz – Powered by Gen AI", align="C")
 
-def sanitize_text(text):
-    return re.sub(r'[^\x20-\x7E]+', ' ', str(text or ""))[:200]
+def generate_pdf(ai_text, kpis, charts):
+    """Generate PDF with Executive Summary Page"""
+    def clean(txt):
+        if txt is None or pd.isna(txt): return "N/A"
+        txt = str(txt).replace("₹", "Rs").replace("\n", " ").replace("\r", " ")
+        txt = re.sub(r"[^\x20-\x7E]+", " ", txt)
+        return txt[:120]
 
-def generate_pdf(ai_text, kpis):
     pdf = BrandedPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", size=11)
-    pdf.cell(0, 10, f"Generated: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC", ln=True)
+    pdf.cell(0, 10, f"Generated on: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC", ln=True)
+
     pdf.ln(5)
     pdf.set_font("Helvetica", "B", 12)
     pdf.cell(0, 8, "Key KPIs", ln=True)
     pdf.set_font("Helvetica", size=11)
     for k, v in kpis.items():
-        pdf.multi_cell(0, 8, f"{sanitize_text(k).title()}: {sanitize_text(v)}")
+        pdf.multi_cell(0, 8, f"{clean(k).title()}: {clean(v)}")
+
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "📊 Executive Summary", ln=True)
     pdf.ln(5)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, "AI Insight Summary", ln=True)
     pdf.set_font("Helvetica", size=11)
-    for line in sanitize_text(ai_text).split(". "):
-        pdf.multi_cell(0, 6, line.strip())
+
+    # Structured formatting
+    sections = {
+        "Executive Summary": "💼",
+        "Key Observations": "🔍",
+        "Root Causes": "⚙️",
+        "Recommendations": "🧭",
+        "Next Month’s KPI Goals": "🎯"
+    }
+    for section, emoji in sections.items():
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 8, f"{emoji} {section}", ln=True)
+        pdf.set_font("Helvetica", size=11)
+        matches = re.findall(f"{section}(.*?)(?=\n|$)", ai_text, re.IGNORECASE | re.DOTALL)
+        if matches:
+            pdf.multi_cell(0, 7, clean(matches[0].strip()))
+        pdf.ln(4)
+
+    pdf.add_page()
+    for name, path in charts.items():
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, name, ln=True)
+        try:
+            pdf.image(path, w=160)
+        except:
+            pdf.multi_cell(0, 6, f"(Chart {name} unavailable)")
+        pdf.ln(5)
+
     return io.BytesIO(bytes(pdf.output(dest='S').encode('latin-1', errors='ignore')))
 
 # ----------------------------------------------------------
-# PAGE: ANALYZE & GENERATE
+# PAGE 1: ANALYZE
 # ----------------------------------------------------------
 if page == "🔍 Analyze & Generate":
     uploaded_file = st.file_uploader("📁 Upload your SAP Procurement Data", type=["csv", "xlsx"])
@@ -236,13 +303,14 @@ if page == "🔍 Analyze & Generate":
         df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith(".xlsx") else pd.read_csv(uploaded_file)
         df = normalize_columns(coerce_types(df))
         kpis, df = calculate_kpis(df)
+        charts = generate_charts(df)
         ai_text = generate_ai_summary(build_prompt(kpis))
         st.markdown(ai_text)
-        pdf_bytes = generate_pdf(ai_text, kpis)
-        st.download_button("📄 Download Report", pdf_bytes, f"SAP_Report_{datetime.date.today()}.pdf", "application/pdf")
+        pdf_bytes = generate_pdf(ai_text, kpis, charts)
+        st.download_button("📄 Download Executive Report", pdf_bytes, f"SAP_Report_{datetime.date.today()}.pdf", "application/pdf")
 
 # ----------------------------------------------------------
-# PAGE: CUSTOMER REPORT PORTAL
+# PAGE 2: REPORT PORTAL
 # ----------------------------------------------------------
 if page == "📬 My Reports Portal":
     st.markdown("### 📦 Access Your Reports")
