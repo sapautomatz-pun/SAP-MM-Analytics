@@ -15,7 +15,7 @@ import datetime
 # ---------------------------------------------------------------------
 BACKEND_VERIFY_URL = "https://sapautomatz-backend.onrender.com/verify_access"
 RENEW_URL = "https://rzp.io/l/sapautomatz"
-LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/main/sapautomatz_logo.png
+LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png
 "  # ✅ Replace with your uploaded logo URL
 
 st.set_page_config(page_title="SAP Automatz - Procurement Analytics",
