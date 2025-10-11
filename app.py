@@ -72,7 +72,7 @@ if not st.session_state.verified:
     if st.button("Verify Access"):
         try:
             # example endpoint: GET BACKEND_URL/verify_key/{key} returning JSON {"valid": true/false, ...}
-            resp = requests.get(f"{BACKEND_URL}/verify_key/{access_key}", timeout=10)
+            resp = requests.get(f"{BACKEND_URL}/verify_key/{access_key}", timeout=25)
             ok = False
             try:
                 ok = resp.status_code == 200 and resp.json().get("valid", False)
@@ -427,7 +427,7 @@ def send_pdf_via_mailersend(api_key, sender_email, sender_name, recipient_email,
         "attachments": [{"content": b64, "filename": filename}]
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    resp = requests.post(url, headers=headers, json=payload, timeout=15)
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
     return resp
 
 # -------------------------
