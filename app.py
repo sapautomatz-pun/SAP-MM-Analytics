@@ -1,5 +1,5 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI App (Streamlit v7.0)
+# SAP AUTOMATZ - Procurement Analytics AI App (Streamlit v8.0)
 # ==========================================================
 # Features:
 #  - Access validation (via backend /verify_access)
@@ -7,6 +7,7 @@
 #  - KPI extraction (pandas)
 #  - AI insight generation (OpenAI GPT)
 #  - PDF report export
+#  - Compatible with openai>=1.0 and Streamlit Cloud
 # ==========================================================
 
 import os
@@ -19,15 +20,15 @@ import matplotlib.pyplot as plt
 from fpdf import FPDF
 import datetime
 import streamlit as st
-import openai
+from openai import OpenAI
 
 # ----------------------------------------------------------
 # CONFIGURATION
 # ----------------------------------------------------------
 BACKEND_URL = "https://sapautomatz-backend.onrender.com"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
 MODEL = "gpt-4o-mini"
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ----------------------------------------------------------
 # STREAMLIT PAGE SETTINGS
@@ -71,9 +72,23 @@ if access_key:
 else:
     valid_access = False
 
-# Stop here if invalid
 if not valid_access:
     st.stop()
+
+# ----------------------------------------------------------
+# OPENAI CONNECTION TEST
+# ----------------------------------------------------------
+st.markdown("### 🤖 Test OpenAI Connection")
+if st.button("🔌 Test Connection to OpenAI"):
+    if not OPENAI_API_KEY:
+        st.error("❌ OPENAI_API_KEY is not set. Please check Streamlit Secrets.")
+    else:
+        try:
+            models = client.models.list()
+            model_names = [m.id for m in models.data if "gpt" in m.id]
+            st.success(f"✅ Connected successfully! Models available: {', '.join(model_names[:3])}")
+        except Exception as e:
+            st.error(f"❌ Connection failed: {e}")
 
 # ----------------------------------------------------------
 # STEP 2: FILE UPLOAD
@@ -134,7 +149,7 @@ def calculate_kpis(df):
         kpis["delays"] = len(df[df["CYCLE_DAYS"] > 7])
     else:
         kpis["avg_cycle"], kpis["delays"] = None, 0
-    if "VENDOR" in df.columns:
+    if "VENDOR" in df.columns and "VALUE" in df.columns:
         kpis["top_vendor"] = df.groupby("VENDOR")["VALUE"].sum().idxmax()
     else:
         kpis["top_vendor"] = "N/A"
@@ -166,9 +181,14 @@ def build_prompt(kpis, df):
     ]
     return "\n".join(lines)
 
+# ----------------------------------------------------------
+# NEW OPENAI API CALL (v1.x)
+# ----------------------------------------------------------
 def generate_ai_summary(prompt):
+    if not OPENAI_API_KEY:
+        return "⚠️ No OpenAI API key configured."
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": "You are a senior procurement analyst."},
@@ -182,7 +202,7 @@ def generate_ai_summary(prompt):
         return f"Error generating AI summary: {e}"
 
 # ----------------------------------------------------------
-# PDF GENERATION
+# FIXED PDF GENERATION
 # ----------------------------------------------------------
 def generate_pdf(ai_text, kpis, df):
     pdf = FPDF()
@@ -202,10 +222,9 @@ def generate_pdf(ai_text, kpis, df):
     pdf.set_font("Arial", size=11)
     for line in ai_text.split("\n"):
         pdf.multi_cell(0, 6, line)
-    out = io.BytesIO()
-    pdf.output(out)
-    out.seek(0)
-    return out
+    
+    pdf_bytes = pdf.output(dest='S').encode('latin-1')
+    return io.BytesIO(pdf_bytes)
 
 # ----------------------------------------------------------
 # MAIN APP FLOW
@@ -232,14 +251,11 @@ if uploaded_file is not None:
     col4.metric("Delayed Shipments", kpis["delays"])
 
     st.markdown("### 🧠 AI-Generated Insights")
-    if OPENAI_API_KEY:
-        with st.spinner("Generating AI summary..."):
-            prompt = build_prompt(kpis, df)
-            ai_text = generate_ai_summary(prompt)
-            st.success("AI analysis complete ✅")
-            st.markdown(ai_text)
-    else:
-        st.error("OpenAI API key not configured. Please set OPENAI_API_KEY in Streamlit secrets.")
+    with st.spinner("Generating AI summary..."):
+        prompt = build_prompt(kpis, df)
+        ai_text = generate_ai_summary(prompt)
+        st.success("AI analysis complete ✅")
+        st.markdown(ai_text)
 
     if st.button("📄 Generate PDF Report"):
         pdf_bytes = generate_pdf(ai_text, kpis, df)
