@@ -1,5 +1,7 @@
 streamlit
 pandas
 openai
+fpdf2
 matplotlib
-fpdf
+requests
+numpy

@@ -1,33 +1,37 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI App (Streamlit v8.0)
+# SAP AUTOMATZ - Procurement Analytics AI App (Streamlit v13.0)
 # ==========================================================
-# Features:
-#  - Access validation (via backend /verify_access)
-#  - Upload SAP PO / GRN file (CSV/XLSX)
-#  - KPI extraction (pandas)
-#  - AI insight generation (OpenAI GPT)
-#  - PDF report export
-#  - Compatible with openai>=1.0 and Streamlit Cloud
+# New Features:
+#  ✅ Branded Header/Footer in PDF
+#  ✅ Vendor / Material / Monthly Trend Charts
+#  ✅ AI Insights (GPT-4o)
+#  ✅ One-Click Branded PDF Export
+#  ✅ Email Report to Customer (MailerSend API)
 # ==========================================================
 
 import os
 import io
+import re
 import json
 import requests
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from fpdf import FPDF
 import datetime
 import streamlit as st
+import matplotlib.pyplot as plt
 from openai import OpenAI
+from fpdf import FPDF
 
 # ----------------------------------------------------------
 # CONFIGURATION
 # ----------------------------------------------------------
 BACKEND_URL = "https://sapautomatz-backend.onrender.com"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY") or "mlsn-your-key-here"
+MAILER_FROM_EMAIL = "sapautomatz@gmail.com"
+MAILER_FROM_NAME = "SAP Automatz"
 MODEL = "gpt-4o-mini"
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ----------------------------------------------------------
@@ -44,13 +48,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------
-# VERIFY ACCESS
+# LOGO + TITLE
 # ----------------------------------------------------------
 st.image("https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png", width=180)
 st.title("SAP Automatz - Procurement Analytics AI")
+st.caption("Automate. Analyze. Accelerate 🚀")
 
+# ----------------------------------------------------------
+# ACCESS VALIDATION
+# ----------------------------------------------------------
 st.markdown("#### 🔐 Step 1: Verify your Access Key")
-
 access_key = st.text_input("Enter your Access Key (from your purchase email)", type="password")
 
 if access_key:
@@ -60,11 +67,8 @@ if access_key:
         if res.status_code == 200 and data.get("status") == "ok":
             st.success(f"✅ Access granted to {data.get('name')} ({data.get('plan').capitalize()} plan, valid until {data.get('expiry')})")
             valid_access = True
-        elif res.status_code == 403:
-            st.error("❌ Access expired. Please renew your subscription.")
-            valid_access = False
         else:
-            st.error("❌ Invalid Access Key.")
+            st.error("❌ Invalid or expired Access Key.")
             valid_access = False
     except Exception as e:
         st.error(f"Error verifying access: {e}")
@@ -76,50 +80,25 @@ if not valid_access:
     st.stop()
 
 # ----------------------------------------------------------
-# OPENAI CONNECTION TEST
-# ----------------------------------------------------------
-st.markdown("### 🤖 Test OpenAI Connection")
-if st.button("🔌 Test Connection to OpenAI"):
-    if not OPENAI_API_KEY:
-        st.error("❌ OPENAI_API_KEY is not set. Please check Streamlit Secrets.")
-    else:
-        try:
-            models = client.models.list()
-            model_names = [m.id for m in models.data if "gpt" in m.id]
-            st.success(f"✅ Connected successfully! Models available: {', '.join(model_names[:3])}")
-        except Exception as e:
-            st.error(f"❌ Connection failed: {e}")
-
-# ----------------------------------------------------------
-# STEP 2: FILE UPLOAD
+# FILE UPLOAD
 # ----------------------------------------------------------
 st.markdown("### 📁 Step 2: Upload your SAP Procurement Data")
-st.write("Upload your SAP Purchase Order or GRN file (.csv or .xlsx).")
-
 uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx"])
 
 # ----------------------------------------------------------
-# UTILITIES
+# DATA UTILITIES
 # ----------------------------------------------------------
 def load_uploaded_file(uploaded_file):
-    if uploaded_file.name.endswith(".xlsx"):
-        return pd.read_excel(uploaded_file)
-    else:
-        return pd.read_csv(uploaded_file)
+    return pd.read_excel(uploaded_file) if uploaded_file.name.endswith(".xlsx") else pd.read_csv(uploaded_file)
 
 def normalize_columns(df):
     df = df.rename(columns=lambda x: str(x).strip().upper())
     mapping = {
-        "PO NO": "PO_NUMBER",
-        "PURCHASE ORDER": "PO_NUMBER",
-        "PO_DATE": "PO_DATE",
-        "GRN_DATE": "GRN_DATE",
-        "VENDOR": "VENDOR",
-        "SUPPLIER": "VENDOR",
-        "MATERIAL": "MATERIAL",
-        "QUANTITY": "QUANTITY",
-        "VALUE": "VALUE",
-        "AMOUNT": "VALUE"
+        "PO NO": "PO_NUMBER", "PURCHASE ORDER": "PO_NUMBER",
+        "PO_DATE": "PO_DATE", "GRN_DATE": "GRN_DATE",
+        "VENDOR": "VENDOR", "SUPPLIER": "VENDOR",
+        "MATERIAL": "MATERIAL", "QUANTITY": "QUANTITY",
+        "VALUE": "VALUE", "AMOUNT": "VALUE"
     }
     for key, val in mapping.items():
         for col in df.columns:
@@ -156,37 +135,71 @@ def calculate_kpis(df):
     return kpis, df
 
 # ----------------------------------------------------------
-# AI PROMPT GENERATION
+# CHARTS
 # ----------------------------------------------------------
-def build_prompt(kpis, df):
-    lines = [
-        "You are a procurement analytics assistant.",
-        "Analyze the following KPIs and dataset summary, then provide a business-level report:",
-        "",
-        f"Total Records: {kpis.get('records')}",
-        f"Total Spend (₹): {kpis.get('total_spend', 'N/A')}",
-        f"Average Cycle Time: {kpis.get('avg_cycle', 'N/A')} days",
-        f"Delayed Shipments (>7 days): {kpis.get('delays', 0)}",
-        f"Top Vendor by Spend: {kpis.get('top_vendor', 'N/A')}",
-        "",
-        "Sample Data (first 10 rows):",
-        df.head(10).to_csv(index=False),
-        "",
-        "Now write:",
-        "1️⃣ A 5-bullet Executive Summary.",
-        "2️⃣ 3 key Root-Cause Hypotheses.",
-        "3️⃣ 3 Actionable Recommendations.",
-        "4️⃣ 3 Suggested KPIs to track next month.",
-        "Keep under 350 words. Use simple business language."
-    ]
-    return "\n".join(lines)
+def generate_charts(df):
+    chart_paths = {}
+
+    # Vendors
+    if "VENDOR" in df.columns and "VALUE" in df.columns:
+        top_vendors = df.groupby("VENDOR")["VALUE"].sum().sort_values(ascending=False).head(10)
+        plt.figure(figsize=(8,4))
+        top_vendors.plot(kind='bar', color='steelblue', title="Top 10 Vendors by Spend (₹)")
+        plt.ylabel("Spend (₹)")
+        plt.tight_layout()
+        vendor_chart = "/tmp/vendor_chart.png"
+        plt.savefig(vendor_chart)
+        chart_paths["Top Vendors"] = vendor_chart
+        st.image(vendor_chart, caption="Top Vendors by Spend")
+
+    # Materials
+    if "MATERIAL" in df.columns and "VALUE" in df.columns:
+        material_spend = df.groupby("MATERIAL")["VALUE"].sum().sort_values(ascending=False).head(8)
+        plt.figure(figsize=(5,5))
+        plt.pie(material_spend, labels=material_spend.index, autopct="%1.1f%%")
+        plt.title("Material Spend Distribution")
+        plt.tight_layout()
+        material_chart = "/tmp/material_chart.png"
+        plt.savefig(material_chart)
+        chart_paths["Material Spend"] = material_chart
+        st.image(material_chart, caption="Material Spend Distribution")
+
+    # Monthly Trend
+    if "PO_DATE" in df.columns and "VALUE" in df.columns:
+        df["MONTH"] = df["PO_DATE"].dt.to_period("M").astype(str)
+        monthly_spend = df.groupby("MONTH")["VALUE"].sum().sort_index()
+        plt.figure(figsize=(8,4))
+        monthly_spend.plot(marker='o', color='darkorange', title="Monthly Spend Trend")
+        plt.ylabel("Spend (₹)")
+        plt.tight_layout()
+        trend_chart = "/tmp/trend_chart.png"
+        plt.savefig(trend_chart)
+        chart_paths["Monthly Trend"] = trend_chart
+        st.image(trend_chart, caption="Monthly Spend Trend")
+
+    return chart_paths
 
 # ----------------------------------------------------------
-# NEW OPENAI API CALL (v1.x)
+# AI ANALYSIS
 # ----------------------------------------------------------
+def build_prompt(kpis, df):
+    return f"""
+You are a procurement analytics assistant.
+Analyze these KPIs and dataset:
+Total Records: {kpis['records']}
+Total Spend: ₹{kpis['total_spend']:,}
+Average Cycle Time: {kpis['avg_cycle']} days
+Delayed Shipments: {kpis['delays']}
+Top Vendor: {kpis['top_vendor']}
+Provide insights in 4 short sections:
+1️⃣ Executive Summary
+2️⃣ Root Causes
+3️⃣ Actionable Recommendations
+4️⃣ Suggested KPIs for next month.
+Keep under 350 words.
+"""
+
 def generate_ai_summary(prompt):
-    if not OPENAI_API_KEY:
-        return "⚠️ No OpenAI API key configured."
     try:
         response = client.chat.completions.create(
             model=MODEL,
@@ -202,29 +215,70 @@ def generate_ai_summary(prompt):
         return f"Error generating AI summary: {e}"
 
 # ----------------------------------------------------------
-# FIXED PDF GENERATION
+# PDF GENERATION (Branded)
 # ----------------------------------------------------------
-def generate_pdf(ai_text, kpis, df):
-    pdf = FPDF()
+class BrandedPDF(FPDF):
+    def header(self):
+        self.set_fill_color(33, 86, 145)
+        self.rect(0, 0, 210, 20, 'F')
+        self.image("https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png", 10, 2, 25)
+        self.set_text_color(255,255,255)
+        self.set_font("Helvetica", "B", 14)
+        self.cell(0, 10, "SAP Automatz - Procurement Analytics Report", align="C", ln=True)
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Helvetica", "I", 9)
+        self.set_text_color(130,130,130)
+        self.cell(0, 10, "© 2025 SAP Automatz – Powered by Gen AI", align="C")
+
+def generate_pdf(ai_text, kpis, df, chart_paths):
+    pdf = BrandedPDF()
     pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "SAP Automatz - Procurement Report", ln=True, align="C")
-    pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, f"Generated: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC", ln=True)
+    pdf.set_font("Helvetica", size=11)
+    pdf.cell(0, 10, f"Generated on: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC", ln=True)
     pdf.ln(5)
-    pdf.cell(0, 10, "Key KPIs", ln=True)
-    pdf.set_font("Arial", size=11)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Key KPIs", ln=True)
+    pdf.set_font("Helvetica", size=11)
     for k, v in kpis.items():
-        pdf.cell(0, 8, f"{k.title()}: {v}", ln=True)
-    pdf.ln(8)
-    pdf.set_font("Arial", "B", 12)
+        pdf.multi_cell(0, 8, f"{k.title()}: {v}")
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 12)
     pdf.cell(0, 8, "AI Insight Summary", ln=True)
-    pdf.set_font("Arial", size=11)
+    pdf.set_font("Helvetica", size=11)
     for line in ai_text.split("\n"):
         pdf.multi_cell(0, 6, line)
-    
-    pdf_bytes = pdf.output(dest='S').encode('latin-1')
+    pdf.ln(6)
+    for name, path in chart_paths.items():
+        pdf.cell(0, 8, f"{name} Chart", ln=True)
+        pdf.image(path, w=160)
+        pdf.ln(6)
+    pdf_bytes = bytes(pdf.output(dest='S').encode('latin-1', errors='ignore'))
     return io.BytesIO(pdf_bytes)
+
+# ----------------------------------------------------------
+# EMAIL SENDING
+# ----------------------------------------------------------
+def send_report_via_email(email, pdf_bytes):
+    try:
+        files = {'attachments': ('SAP_Procurement_Report.pdf', pdf_bytes, 'application/pdf')}
+        payload = {
+            "from": {"email": MAILER_FROM_EMAIL, "name": MAILER_FROM_NAME},
+            "to": [{"email": email}],
+            "subject": "Your SAP Automatz Procurement Analytics Report",
+            "text": "Dear Customer,\n\nPlease find attached your SAP Procurement Analytics report generated by SAP Automatz.\n\nRegards,\nSAP Automatz Team",
+        }
+        headers = {"Authorization": f"Bearer {MAILERSEND_API_KEY}", "Content-Type": "application/json"}
+        response = requests.post("https://api.mailersend.com/v1/email", headers=headers, json=payload, files=files)
+        if response.status_code in [200, 202]:
+            return True
+        else:
+            return False
+    except Exception as e:
+        st.error(f"Email sending failed: {e}")
+        return False
 
 # ----------------------------------------------------------
 # MAIN APP FLOW
@@ -234,32 +288,40 @@ if uploaded_file is not None:
     df = normalize_columns(df)
     df = coerce_types(df)
 
-    if df.empty:
-        st.error("Uploaded file has no valid data.")
-        st.stop()
-
     st.markdown("### 📊 Data Preview")
     st.dataframe(df.head(10))
 
     with st.spinner("Analyzing data..."):
         kpis, df = calculate_kpis(df)
+        charts = generate_charts(df)
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Records", kpis["records"])
     col2.metric("Total Spend (₹)", f"{kpis['total_spend']:,.0f}" if kpis["total_spend"] else "N/A")
-    col3.metric("Avg Cycle Time (days)", kpis["avg_cycle"] if kpis["avg_cycle"] else "N/A")
+    col3.metric("Avg Cycle Time (days)", kpis["avg_cycle"])
     col4.metric("Delayed Shipments", kpis["delays"])
 
     st.markdown("### 🧠 AI-Generated Insights")
     with st.spinner("Generating AI summary..."):
-        prompt = build_prompt(kpis, df)
-        ai_text = generate_ai_summary(prompt)
+        ai_text = generate_ai_summary(build_prompt(kpis, df))
         st.success("AI analysis complete ✅")
         st.markdown(ai_text)
 
     if st.button("📄 Generate PDF Report"):
-        pdf_bytes = generate_pdf(ai_text, kpis, df)
+        pdf_bytes = generate_pdf(ai_text, kpis, df, charts)
         st.download_button("Download Report", pdf_bytes, "SAP_Procurement_Report.pdf", "application/pdf")
+
+        st.markdown("---")
+        st.markdown("### ✉️ Email this report to your customer")
+        recipient_email = st.text_input("Enter recipient email address")
+        if st.button("Send Report via Email"):
+            if recipient_email:
+                if send_report_via_email(recipient_email, pdf_bytes.getvalue()):
+                    st.success(f"✅ Report sent successfully to {recipient_email}")
+                else:
+                    st.error("❌ Failed to send report. Please verify your MailerSend API key.")
+            else:
+                st.warning("Please enter a valid recipient email address.")
 
 else:
     st.info("Please upload a SAP PO or GRN file to continue.")
