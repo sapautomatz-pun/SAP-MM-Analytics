@@ -1,12 +1,11 @@
 # ==========================================================
-# SAP AUTOMATZ - Procurement Analytics AI App (v16.0)
+# SAP AUTOMATZ - Procurement Analytics AI App (v17.0)
 # ==========================================================
 # Features:
-#  ✅ AI Insights (GPT-4o)
-#  ✅ Branded PDF & HTML Email
-#  ✅ Airtable storage of sent reports
-#  ✅ “My Reports” Portal for customers
-#  ✅ Test PDF Preview mode
+#  ✅ Secure Access Key Verification + Remember Me
+#  ✅ Branded Header (always visible)
+#  ✅ GPT-4o Insights, PDF Reports
+#  ✅ Airtable Storage + Customer Report Portal
 # ==========================================================
 
 import os
@@ -15,7 +14,6 @@ import re
 import json
 import requests
 import pandas as pd
-import numpy as np
 import datetime
 import streamlit as st
 import matplotlib
@@ -30,15 +28,15 @@ from fpdf import FPDF
 BACKEND_URL = "https://sapautomatz-backend.onrender.com"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY")
-MAILER_FROM_EMAIL = "sapautomatz@gmail.com"
-MAILER_FROM_NAME = "SAP Automatz"
-MODEL = "gpt-4o-mini"
-LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png"
-
-# Airtable setup
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Reports")
+
+MAILER_FROM_EMAIL = "sapautomatz@gmail.com"
+MAILER_FROM_NAME = "SAP Automatz"
+MODEL = "gpt-4o-mini"
+
+LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -46,17 +44,81 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # STREAMLIT SETTINGS
 # ----------------------------------------------------------
 st.set_page_config(page_title="SAP Automatz - Procurement Analytics AI", page_icon="📊", layout="wide")
-st.markdown("""<style>.main {background-color: #F6F9FC;} div.block-container {padding-top: 2rem;}</style>""", unsafe_allow_html=True)
+
+# CSS Styling
+st.markdown("""
+<style>
+.main {background-color: #F6F9FC;}
+div.block-container {padding-top: 1.5rem;}
+h1, h2, h3, h4, h5 {color: #215691;}
+.stApp header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
 # ----------------------------------------------------------
-# HEADER + NAVIGATION
+# HEADER
+# ----------------------------------------------------------
+col1, col2 = st.columns([1, 3])
+with col1:
+    st.image(LOGO_URL, width=160)
+with col2:
+    st.markdown("""
+        <h2 style='margin-bottom:0;'>SAP Automatz Procurement Analytics AI</h2>
+        <p style='color:#444;margin-top:0;'>Automate. Analyze. Accelerate 🚀</p>
+    """, unsafe_allow_html=True)
+st.divider()
+
+# ----------------------------------------------------------
+# SESSION STATE (Remember Me)
+# ----------------------------------------------------------
+if "access_verified" not in st.session_state:
+    st.session_state.access_verified = False
+if "customer_name" not in st.session_state:
+    st.session_state.customer_name = ""
+if "plan_type" not in st.session_state:
+    st.session_state.plan_type = ""
+if "expiry" not in st.session_state:
+    st.session_state.expiry = ""
+
+# ----------------------------------------------------------
+# ACCESS VERIFICATION
+# ----------------------------------------------------------
+if not st.session_state.access_verified:
+    st.markdown("### 🔐 Step 1: Verify Your Access Key")
+    access_key = st.text_input("Enter your Access Key (received after payment)", type="password")
+    remember = st.checkbox("Remember me (for this device)")
+
+    if st.button("Verify Access"):
+        try:
+            res = requests.get(f"{BACKEND_URL}/verify_access", params={"key": access_key}, timeout=10)
+            data = res.json()
+            if res.status_code == 200 and data.get("status") == "ok":
+                st.session_state.access_verified = True
+                st.session_state.customer_name = data.get("name")
+                st.session_state.plan_type = data.get("plan").capitalize()
+                st.session_state.expiry = data.get("expiry")
+                if remember:
+                    st.session_state["remember_me"] = True
+                st.success(f"✅ Access granted to **{data.get('name')}** ({data.get('plan').capitalize()} plan, valid till {data.get('expiry')})")
+                st.rerun()
+            else:
+                st.error("❌ Invalid or expired Access Key.")
+        except Exception as e:
+            st.error(f"Error verifying access: {e}")
+    st.stop()
+
+# ----------------------------------------------------------
+# POST-VERIFICATION DASHBOARD
 # ----------------------------------------------------------
 st.sidebar.image(LOGO_URL, width=150)
 page = st.sidebar.radio("📘 Navigate", ["🔍 Analyze & Generate", "📬 My Reports Portal"])
 st.sidebar.caption("Automate. Analyze. Accelerate 🚀")
 
+# Display session details
+st.success(f"✅ Logged in as {st.session_state.customer_name} ({st.session_state.plan_type} plan, valid till {st.session_state.expiry})")
+
 # ----------------------------------------------------------
-# UTILITIES
+# HELPER FUNCTIONS
 # ----------------------------------------------------------
 def normalize_columns(df):
     df = df.rename(columns=lambda x: str(x).strip().upper())
@@ -98,18 +160,15 @@ def calculate_kpis(df):
         kpis["top_vendor"] = "N/A"
     return kpis, df
 
-# ----------------------------------------------------------
-# AI ANALYSIS
-# ----------------------------------------------------------
 def build_prompt(kpis):
     return f"""
-Analyze KPIs:
+Analyze these KPIs:
 Total Records: {kpis['records']}
 Total Spend: ₹{kpis['total_spend']:,}
 Average Cycle Time: {kpis['avg_cycle']} days
 Delayed Shipments: {kpis['delays']}
 Top Vendor: {kpis['top_vendor']}
-Provide:
+Provide concise insights under:
 1️⃣ Executive Summary
 2️⃣ Root Causes
 3️⃣ Recommendations
@@ -121,7 +180,7 @@ def generate_ai_summary(prompt):
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "You are a senior procurement analyst."},
+                {"role": "system", "content": "You are a senior SAP procurement analyst."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
@@ -131,9 +190,6 @@ def generate_ai_summary(prompt):
     except Exception as e:
         return f"Error generating AI summary: {e}"
 
-# ----------------------------------------------------------
-# PDF GENERATOR
-# ----------------------------------------------------------
 class BrandedPDF(FPDF):
     def header(self):
         self.set_fill_color(33, 86, 145)
@@ -143,7 +199,6 @@ class BrandedPDF(FPDF):
         self.set_font("Helvetica", "B", 14)
         self.cell(0, 10, "SAP Automatz - Procurement Analytics Report", align="C", ln=True)
         self.ln(5)
-
     def footer(self):
         self.set_y(-15)
         self.set_font("Helvetica", "I", 9)
@@ -151,10 +206,7 @@ class BrandedPDF(FPDF):
         self.cell(0, 10, "© 2025 SAP Automatz – Powered by Gen AI", align="C")
 
 def sanitize_text(text):
-    if text is None:
-        return ""
-    text = re.sub(r'[^\x20-\x7E]+', ' ', str(text))
-    return text.strip()[:200]
+    return re.sub(r'[^\x20-\x7E]+', ' ', str(text or ""))[:200]
 
 def generate_pdf(ai_text, kpis):
     pdf = BrandedPDF()
@@ -173,99 +225,39 @@ def generate_pdf(ai_text, kpis):
     pdf.set_font("Helvetica", size=11)
     for line in sanitize_text(ai_text).split(". "):
         pdf.multi_cell(0, 6, line.strip())
-    pdf_bytes = bytes(pdf.output(dest='S').encode('latin-1', errors='ignore'))
-    return io.BytesIO(pdf_bytes)
+    return io.BytesIO(bytes(pdf.output(dest='S').encode('latin-1', errors='ignore')))
 
 # ----------------------------------------------------------
-# AIRTABLE STORAGE
-# ----------------------------------------------------------
-def store_report_in_airtable(email, report_name, url):
-    endpoint = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}", "Content-Type": "application/json"}
-    data = {"records": [{"fields": {"Email": email, "Report Name": report_name, "Report URL": url, "Created On": str(datetime.date.today())}}]}
-    r = requests.post(endpoint, headers=headers, json=data)
-    return r.status_code in [200, 201]
-
-def fetch_reports_from_airtable(email):
-    endpoint = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}?filterByFormula=FIND('{email}',{{Email}})"
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    r = requests.get(endpoint, headers=headers)
-    if r.status_code == 200:
-        data = r.json()
-        return [{"Report Name": rec["fields"].get("Report Name", ""), "Report URL": rec["fields"].get("Report URL", ""), "Created On": rec["fields"].get("Created On", "")} for rec in data.get("records", [])]
-    return []
-
-# ----------------------------------------------------------
-# EMAIL (HTML)
-# ----------------------------------------------------------
-def build_html_email(customer_name, report_url):
-    return f"""
-    <html>
-    <body style="font-family: Arial; background:#f6f9fc; padding:20px;">
-      <div style="max-width:600px;margin:auto;background:#fff;border-radius:10px;padding:20px;">
-        <div align="center">
-          <img src="{LOGO_URL}" width="120"><h2 style="color:#215691;">SAP Automatz</h2>
-          <p>Automate. Analyze. Accelerate.</p>
-        </div>
-        <p>Dear {customer_name},</p>
-        <p>Your <b>Procurement Analytics Report</b> has been generated.</p>
-        <p align="center">
-          <a href="{report_url}" style="background:#215691;color:#fff;padding:12px 25px;border-radius:8px;text-decoration:none;">📄 Download Report</a>
-        </p>
-        <p>Thank you for using SAP Automatz!</p>
-      </div>
-    </body>
-    </html>
-    """
-
-# ----------------------------------------------------------
-# PAGE 1: ANALYZE & GENERATE
+# PAGE: ANALYZE & GENERATE
 # ----------------------------------------------------------
 if page == "🔍 Analyze & Generate":
     uploaded_file = st.file_uploader("📁 Upload your SAP Procurement Data", type=["csv", "xlsx"])
-    recipient = st.text_input("✉️ Enter Customer Email")
-
-    if uploaded_file and recipient:
+    if uploaded_file:
         df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith(".xlsx") else pd.read_csv(uploaded_file)
         df = normalize_columns(coerce_types(df))
         kpis, df = calculate_kpis(df)
         ai_text = generate_ai_summary(build_prompt(kpis))
+        st.markdown(ai_text)
         pdf_bytes = generate_pdf(ai_text, kpis)
-        report_name = f"SAP_Report_{datetime.date.today()}.pdf"
-        download_url = f"https://sapautomatz.streamlit.app/reports/{report_name}"
-
-        # Save record
-        store_report_in_airtable(recipient, report_name, download_url)
-        st.success("✅ Report generated and stored in Airtable!")
-
-        # Email to customer
-        payload = {
-            "from": {"email": MAILER_FROM_EMAIL, "name": MAILER_FROM_NAME},
-            "to": [{"email": recipient}],
-            "subject": "Your SAP Automatz Procurement Report",
-            "html": build_html_email(recipient, download_url)
-        }
-        files = {'attachments': (report_name, pdf_bytes, 'application/pdf')}
-        headers = {"Authorization": f"Bearer {MAILERSEND_API_KEY}"}
-        requests.post("https://api.mailersend.com/v1/email", headers=headers, data={"message": json.dumps(payload)}, files=files)
-
-        st.download_button("📄 Download Report", pdf_bytes, report_name, "application/pdf")
+        st.download_button("📄 Download Report", pdf_bytes, f"SAP_Report_{datetime.date.today()}.pdf", "application/pdf")
 
 # ----------------------------------------------------------
-# PAGE 2: CUSTOMER REPORT PORTAL
+# PAGE: CUSTOMER REPORT PORTAL
 # ----------------------------------------------------------
 if page == "📬 My Reports Portal":
     st.markdown("### 📦 Access Your Reports")
-    email = st.text_input("Enter your registered email to view reports")
-    if st.button("🔍 Fetch My Reports"):
-        if email:
-            reports = fetch_reports_from_airtable(email)
+    email = st.text_input("Enter your registered email")
+    if st.button("🔍 Fetch Reports"):
+        endpoint = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}?filterByFormula=FIND('{email}',{{Email}})"
+        headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+        r = requests.get(endpoint, headers=headers)
+        if r.status_code == 200:
+            data = r.json()
+            reports = [{"Report Name": rec["fields"].get("Report Name"), "Report URL": rec["fields"].get("Report URL"), "Created On": rec["fields"].get("Created On")} for rec in data.get("records", [])]
             if reports:
-                st.success(f"Found {len(reports)} reports for {email}")
                 for r in reports:
-                    st.markdown(f"📄 **{r['Report Name']}** — _{r['Created On']}_")
-                    st.markdown(f"[🔗 Download Report]({r['Report URL']})", unsafe_allow_html=True)
+                    st.markdown(f"📄 **{r['Report Name']}** — _{r['Created On']}_  \n [🔗 Download]({r['Report URL']})", unsafe_allow_html=True)
             else:
-                st.info("No reports found for this email yet.")
+                st.info("No reports found for this email.")
         else:
-            st.warning("Please enter a valid email address.")
+            st.error("Error fetching from Airtable.")
