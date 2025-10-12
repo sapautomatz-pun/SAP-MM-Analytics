@@ -232,6 +232,14 @@ st.caption("Upload your SAP/ERP Procurement Data to generate AI insights, KPIs &
 
 file = st.file_uploader("📂 Upload SAP or ERP Procurement File", type=["csv","xlsx"])
 
+# -------------------------
+# MAIN APP
+# -------------------------
+st.title("📊 AI Procurement Analytics Dashboard (ERP-Compatible)")
+st.caption("Upload your SAP/ERP Procurement Data to generate AI insights, KPIs & performance reports.")
+
+file = st.file_uploader("📂 Upload SAP or ERP Procurement File", type=["csv","xlsx"])
+
 if file:
     df = pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
     k = calculate_kpis(df)
@@ -240,27 +248,37 @@ if file:
     st.subheader("🏢 Vendor Spend Overview")
     if "VENDOR" in df.columns and "AMOUNT" in df.columns:
         vendor = df.groupby("VENDOR")["AMOUNT"].sum().sort_values(ascending=False).head(10)
-        fig, ax = plt.subplots(figsize=(8,4))
-        vendor.plot(kind="bar", ax=ax, color="#3949ab")
-        ax.set_ylabel("Spend")
-        ax.set_title("Top 10 Vendors by Spend")
-        vendor_chart = "vendor_chart.png"
-        fig.tight_layout()
-        fig.savefig(vendor_chart)
-        charts.append(vendor_chart)
-        st.pyplot(fig)
+        if vendor.sum() > 0:
+            fig, ax = plt.subplots(figsize=(8,4))
+            vendor.plot(kind="bar", ax=ax, color="#3949ab")
+            ax.set_ylabel("Spend")
+            ax.set_title("Top 10 Vendors by Spend")
+            vendor_chart = "vendor_chart.png"
+            fig.tight_layout()
+            fig.savefig(vendor_chart)
+            charts.append(vendor_chart)
+            st.pyplot(fig)
+        else:
+            st.warning("⚠️ Not enough numeric data to generate Vendor Spend chart.")
+    else:
+        st.warning("⚠️ Vendor or Amount column missing. Vendor analysis skipped.")
 
     st.subheader("📦 Material Spend Distribution")
     if "MATERIAL" in df.columns and "AMOUNT" in df.columns:
         mat = df.groupby("MATERIAL")["AMOUNT"].sum().sort_values(ascending=False).head(10)
-        fig2, ax2 = plt.subplots(figsize=(6,6))
-        ax2.pie(mat, labels=mat.index, autopct='%1.1f%%', startangle=90)
-        ax2.set_title("Top 10 Materials by Spend")
-        mat_chart = "material_chart.png"
-        fig2.tight_layout()
-        fig2.savefig(mat_chart)
-        charts.append(mat_chart)
-        st.pyplot(fig2)
+        if mat.sum() > 0:
+            fig2, ax2 = plt.subplots(figsize=(6,6))
+            ax2.pie(mat, labels=mat.index, autopct='%1.1f%%', startangle=90)
+            ax2.set_title("Top 10 Materials by Spend")
+            mat_chart = "material_chart.png"
+            fig2.tight_layout()
+            fig2.savefig(mat_chart)
+            charts.append(mat_chart)
+            st.pyplot(fig2)
+        else:
+            st.warning("⚠️ Not enough numeric data to generate Material Spend chart.")
+    else:
+        st.warning("⚠️ Material or Amount column missing. Material analysis skipped.")
 
     ai_text = ai_summary(k)
     st.subheader("🧠 AI Insights Summary")
