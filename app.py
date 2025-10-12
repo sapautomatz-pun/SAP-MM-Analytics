@@ -1,9 +1,9 @@
 # ==========================================================
 # SAP AUTOMATZ – AI Procurement Analytics (ERP-Compatible)
-# Version: v28.2 ENTERPRISE PATCH
+# Version: v28.3 COMPATIBILITY HOTFIX
 # ==========================================================
-# ✅ FIX: StreamlitDuplicateElementId on verify rerun
-# ✅ FIX: Safe chart generation for missing columns/zeros
+# ✅ FIX: Streamlit rerun deprecation (st.rerun())
+# ✅ FIX: Safe chart generation & rerun verification
 # ✅ ERP-Compatible Branding (SAP/Oracle/Tally support)
 # ==========================================================
 
@@ -266,7 +266,7 @@ if not st.session_state.verified:
                     st.session_state.verified = True
                     st.session_state.access_key = access_key
                     st.success(f"✅ Access verified (valid till {j.get('expiry_date')})")
-                    st.experimental_rerun()
+                    st.rerun()  # ✅ Fixed deprecated call
                 else:
                     st.error(f"❌ Invalid access key: {j.get('reason','check again')}")
             else:
