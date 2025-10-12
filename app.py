@@ -1,10 +1,10 @@
 # ==========================================================
 # SAP AUTOMATZ – AI Procurement Analytics (ERP-Compatible)
-# Version: v28.3 COMPATIBILITY HOTFIX
+# Version: v28.4 STABLE RELEASE
 # ==========================================================
-# ✅ FIX: Streamlit rerun deprecation (st.rerun())
-# ✅ FIX: Safe chart generation & rerun verification
-# ✅ ERP-Compatible Branding (SAP/Oracle/Tally support)
+# ✅ FIX: openpyxl import handling
+# ✅ FIX: safe file upload fallback
+# ✅ FIX: chart safety & rerun logic
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, pandas as pd, numpy as np
@@ -202,7 +202,17 @@ def show_dashboard():
     file = st.file_uploader("📂 Upload SAP or ERP Procurement File", type=["csv","xlsx"], key="file_uploader_main")
 
     if file:
-        df = pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
+        # ✅ Safe file read (openpyxl protection)
+        try:
+            if file.name.endswith(".xlsx"):
+                import openpyxl
+                df = pd.read_excel(file, engine="openpyxl")
+            else:
+                df = pd.read_csv(file)
+        except Exception as e:
+            st.error(f"❌ Failed to read file: {e}")
+            st.stop()
+
         k = calculate_kpis(df)
 
         charts=[]
@@ -266,7 +276,7 @@ if not st.session_state.verified:
                     st.session_state.verified = True
                     st.session_state.access_key = access_key
                     st.success(f"✅ Access verified (valid till {j.get('expiry_date')})")
-                    st.rerun()  # ✅ Fixed deprecated call
+                    st.rerun()
                 else:
                     st.error(f"❌ Invalid access key: {j.get('reason','check again')}")
             else:

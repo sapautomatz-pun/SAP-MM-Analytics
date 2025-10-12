@@ -6,3 +6,4 @@ matplotlib
 requests
 openai
 unidecode
+openpyxl>=3.1.2
