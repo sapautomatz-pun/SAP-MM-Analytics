@@ -1,10 +1,10 @@
 # ==========================================================
 # SAP AUTOMATZ – AI Procurement Analytics (ERP-Compatible)
-# Version: v28.0 ENTERPRISE
+# Version: v28.2 ENTERPRISE PATCH
 # ==========================================================
-# ✅ Rebranded to "SAP Automatz – AI Procurement Analytics"
-# ✅ ERP-compatible (works with SAP, Oracle, Tally, etc.)
-# ✅ Includes all fixes: PDF, charts, AI summary, verification
+# ✅ FIX: StreamlitDuplicateElementId on verify rerun
+# ✅ FIX: Safe chart generation for missing columns/zeros
+# ✅ ERP-Compatible Branding (SAP/Oracle/Tally support)
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, pandas as pd, numpy as np
@@ -35,13 +35,9 @@ else:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -------------------------
-# STREAMLIT CONFIG
+# PAGE CONFIG
 # -------------------------
-st.set_page_config(
-    page_title="SAP Automatz – AI Procurement Analytics (ERP-Compatible)",
-    page_icon="📊",
-    layout="wide"
-)
+st.set_page_config(page_title="SAP Automatz – AI Procurement Analytics", page_icon="📊", layout="wide")
 st.markdown("<style>.stApp header{visibility:hidden}</style>", unsafe_allow_html=True)
 
 col1, col2 = st.columns([1,3])
@@ -58,34 +54,7 @@ with col2:
 st.divider()
 
 # -------------------------
-# ACCESS CONTROL
-# -------------------------
-if "verified" not in st.session_state:
-    st.session_state.verified = False
-
-if not st.session_state.verified:
-    st.markdown("### 🔐 Verify Access")
-    access_key = st.text_input("Enter your access key", type="password", help="Your unique license key from SAP Automatz")
-    if st.button("Verify Access"):
-        try:
-            resp = requests.get(f"{BACKEND_URL}/verify_key/{access_key}", timeout=25)
-            if resp.status_code == 200:
-                j = resp.json()
-                if j.get("valid"):
-                    st.session_state.verified = True
-                    st.session_state.access_key = access_key
-                    st.success(f"✅ Access verified (valid till {j.get('expiry_date')})")
-                    st.rerun()
-                else:
-                    st.error(f"❌ Invalid access key: {j.get('reason','check again')}")
-            else:
-                st.error("Backend did not respond properly.")
-        except Exception as e:
-            st.error(f"Verification error: {e}")
-    st.stop()
-
-# -------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # -------------------------
 def sanitize_text(text):
     if text is None:
@@ -151,7 +120,7 @@ Summarize procurement performance, vendor dependency, cost efficiency, and impro
         return f"AI Error: {e}"
 
 # -------------------------
-# PDF REPORT GENERATION
+# PDF GENERATOR
 # -------------------------
 class PDF(FPDF):
     def header(self): pass
@@ -168,7 +137,7 @@ def generate_pdf(ai_text, k, charts, customer, key):
 
     # --- COVER PAGE ---
     pdf.add_page()
-    pdf.set_fill_color(26, 35, 126)  # Deep Indigo
+    pdf.set_fill_color(26, 35, 126)
     pdf.rect(0,0,210,297,'F')
     try: pdf.image(LOGO_URL,70,30,70)
     except: pass
@@ -220,70 +189,90 @@ def generate_pdf(ai_text, k, charts, customer, key):
             except:
                 pdf.multi_cell(0,6,"Chart unavailable.")
 
-    # --- RETURN STREAM (Compatible with FPDF 1.x) ---
     pdf_bytes = pdf.output(dest="S").encode("latin-1", "ignore")
     return io.BytesIO(pdf_bytes)
 
 # -------------------------
-# MAIN APP
+# DASHBOARD UI
 # -------------------------
-st.title("📊 AI Procurement Analytics Dashboard (ERP-Compatible)")
-st.caption("Upload your SAP/ERP Procurement Data to generate AI insights, KPIs & performance reports.")
+def show_dashboard():
+    st.title("📊 AI Procurement Analytics Dashboard (ERP-Compatible)")
+    st.caption("Upload your SAP/ERP Procurement Data to generate AI insights, KPIs & performance reports.")
 
-file = st.file_uploader("📂 Upload SAP or ERP Procurement File", type=["csv","xlsx"])
+    file = st.file_uploader("📂 Upload SAP or ERP Procurement File", type=["csv","xlsx"], key="file_uploader_main")
 
-# -------------------------
-# MAIN APP
-# -------------------------
-st.title("📊 AI Procurement Analytics Dashboard (ERP-Compatible)")
-st.caption("Upload your SAP/ERP Procurement Data to generate AI insights, KPIs & performance reports.")
+    if file:
+        df = pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
+        k = calculate_kpis(df)
 
-file = st.file_uploader("📂 Upload SAP or ERP Procurement File", type=["csv","xlsx"])
-
-if file:
-    df = pd.read_excel(file) if file.name.endswith(".xlsx") else pd.read_csv(file)
-    k = calculate_kpis(df)
-
-    charts=[]
-    st.subheader("🏢 Vendor Spend Overview")
-    if "VENDOR" in df.columns and "AMOUNT" in df.columns:
-        vendor = df.groupby("VENDOR")["AMOUNT"].sum().sort_values(ascending=False).head(10)
-        if vendor.sum() > 0:
-            fig, ax = plt.subplots(figsize=(8,4))
-            vendor.plot(kind="bar", ax=ax, color="#3949ab")
-            ax.set_ylabel("Spend")
-            ax.set_title("Top 10 Vendors by Spend")
-            vendor_chart = "vendor_chart.png"
-            fig.tight_layout()
-            fig.savefig(vendor_chart)
-            charts.append(vendor_chart)
-            st.pyplot(fig)
+        charts=[]
+        st.subheader("🏢 Vendor Spend Overview")
+        if "VENDOR" in df.columns and "AMOUNT" in df.columns:
+            vendor = df.groupby("VENDOR")["AMOUNT"].sum().sort_values(ascending=False).head(10)
+            if vendor.sum() > 0:
+                fig, ax = plt.subplots(figsize=(8,4))
+                vendor.plot(kind="bar", ax=ax, color="#3949ab")
+                ax.set_ylabel("Spend")
+                ax.set_title("Top 10 Vendors by Spend")
+                vendor_chart = "vendor_chart.png"
+                fig.tight_layout()
+                fig.savefig(vendor_chart)
+                charts.append(vendor_chart)
+                st.pyplot(fig)
+            else:
+                st.warning("⚠️ Not enough numeric data to generate Vendor Spend chart.")
         else:
-            st.warning("⚠️ Not enough numeric data to generate Vendor Spend chart.")
-    else:
-        st.warning("⚠️ Vendor or Amount column missing. Vendor analysis skipped.")
+            st.warning("⚠️ Vendor or Amount column missing. Vendor analysis skipped.")
 
-    st.subheader("📦 Material Spend Distribution")
-    if "MATERIAL" in df.columns and "AMOUNT" in df.columns:
-        mat = df.groupby("MATERIAL")["AMOUNT"].sum().sort_values(ascending=False).head(10)
-        if mat.sum() > 0:
-            fig2, ax2 = plt.subplots(figsize=(6,6))
-            ax2.pie(mat, labels=mat.index, autopct='%1.1f%%', startangle=90)
-            ax2.set_title("Top 10 Materials by Spend")
-            mat_chart = "material_chart.png"
-            fig2.tight_layout()
-            fig2.savefig(mat_chart)
-            charts.append(mat_chart)
-            st.pyplot(fig2)
+        st.subheader("📦 Material Spend Distribution")
+        if "MATERIAL" in df.columns and "AMOUNT" in df.columns:
+            mat = df.groupby("MATERIAL")["AMOUNT"].sum().sort_values(ascending=False).head(10)
+            if mat.sum() > 0:
+                fig2, ax2 = plt.subplots(figsize=(6,6))
+                ax2.pie(mat, labels=mat.index, autopct='%1.1f%%', startangle=90)
+                ax2.set_title("Top 10 Materials by Spend")
+                mat_chart = "material_chart.png"
+                fig2.tight_layout()
+                fig2.savefig(mat_chart)
+                charts.append(mat_chart)
+                st.pyplot(fig2)
+            else:
+                st.warning("⚠️ Not enough numeric data to generate Material Spend chart.")
         else:
-            st.warning("⚠️ Not enough numeric data to generate Material Spend chart.")
-    else:
-        st.warning("⚠️ Material or Amount column missing. Material analysis skipped.")
+            st.warning("⚠️ Material or Amount column missing. Material analysis skipped.")
 
-    ai_text = ai_summary(k)
-    st.subheader("🧠 AI Insights Summary")
-    st.markdown(ai_text)
+        ai_text = ai_summary(k)
+        st.subheader("🧠 AI Insights Summary")
+        st.markdown(ai_text)
 
-    pdf_bytes = generate_pdf(ai_text, k, charts, "ABC Manufacturing Pvt Ltd", st.session_state.access_key)
-    st.download_button("📄 Download AI Report (PDF)", pdf_bytes, f"SAP_Automatz_Report_{datetime.date.today()}.pdf", "application/pdf")
+        pdf_bytes = generate_pdf(ai_text, k, charts, "ABC Manufacturing Pvt Ltd", st.session_state.access_key)
+        st.download_button("📄 Download AI Report (PDF)", pdf_bytes, f"SAP_Automatz_Report_{datetime.date.today()}.pdf", "application/pdf")
 
+# -------------------------
+# ACCESS FLOW
+# -------------------------
+if "verified" not in st.session_state:
+    st.session_state.verified = False
+
+if not st.session_state.verified:
+    st.markdown("### 🔐 Verify Access")
+    access_key = st.text_input("Enter your access key", type="password", key="access_key_input")
+    if st.button("Verify Access"):
+        try:
+            resp = requests.get(f"{BACKEND_URL}/verify_key/{access_key}", timeout=25)
+            if resp.status_code == 200:
+                j = resp.json()
+                if j.get("valid"):
+                    st.session_state.verified = True
+                    st.session_state.access_key = access_key
+                    st.success(f"✅ Access verified (valid till {j.get('expiry_date')})")
+                    st.experimental_rerun()
+                else:
+                    st.error(f"❌ Invalid access key: {j.get('reason','check again')}")
+            else:
+                st.error("Backend did not respond properly.")
+        except Exception as e:
+            st.error(f"Verification error: {e}")
+    st.stop()
+else:
+    show_dashboard()
