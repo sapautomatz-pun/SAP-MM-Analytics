@@ -1,6 +1,6 @@
 # ==========================================================
-# SAP AUTOMATZ – AI Procurement Analytics (ERP-Compatible)
-# Executive Dashboard Edition (v31.1 – Unicode Safe Watermark)
+# SAP AUTOMATZ – Executive Procurement Analytics (ERP-Compatible)
+# Version: v31.2 (Full Unicode Safe + Watermark + Registered Fonts)
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, math
@@ -14,7 +14,6 @@ from fpdf import FPDF
 from unidecode import unidecode
 
 # ------------------------- CONFIG -------------------------
-BACKEND_URL = os.getenv("BACKEND_URL", "https://sapautomatz-backend.onrender.com")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = "gpt-4o-mini"
 LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1d3346d7d35396f13ff06da26f24ebb5ebb70f23/sapautomatz_logo.png"
@@ -82,9 +81,9 @@ def compute_kpis(df):
             "top_v":top_v,"top_m":top_m,"monthly":monthly,"records":len(df)}
 
 def generate_ai(k):
-    prompt=f"""Provide concise professional procurement insights based on:
+    prompt=f"""Provide concise procurement insights based on:
 Totals {k['totals']}, top vendors {list(k['top_v'].keys())[:5]}, top materials {list(k['top_m'].keys())[:5]}, months {list(k['monthly'].keys())[:6]}.
-Return three sections titled Executive Insights, Recommendations, and Key Action Points (bulleted)."""
+Return three sections: Executive Insights, Recommendations, Key Action Points."""
     try:
         r=client.chat.completions.create(model=MODEL,messages=[{"role":"user","content":prompt}],temperature=0.3,max_tokens=400)
         return sanitize_text(r.choices[0].message.content)
@@ -101,14 +100,15 @@ class PDF(FPDF):
 
     def watermark(self):
         self.set_text_color(200,200,200)
-        self.set_font("DejaVu","B",36)
+        self.set_font("DejaVu","B",32)
         self.rotate(45)
-        self.text(30,150,"SAP Automatz – Automate • Analyze • Accelerate")
+        self.text(25,150,"SAP Automatz – Automate • Analyze • Accelerate")
         self.rotate(0)
 
     def rotate(self,angle,x=None,y=None):
         if angle!=0:
-            self._out(f"q {math.cos(angle*math.pi/180):.5f} {math.sin(angle*math.pi/180):.5f} {-math.sin(angle*math.pi/180):.5f} {math.cos(angle*math.pi/180):.5f} 0 0 cm")
+            self._out(f"q {math.cos(angle*math.pi/180):.5f} {math.sin(angle*math.pi/180):.5f} "
+                      f"{-math.sin(angle*math.pi/180):.5f} {math.cos(angle*math.pi/180):.5f} 0 0 cm")
         else:
             self._out("Q")
 
@@ -125,10 +125,21 @@ def add_tile(pdf,x,y,w,h,title,value,color):
 
 def generate_pdf(ai,k,charts):
     pdf=PDF()
-    # add fonts for Unicode
-    font_dir = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    pdf.add_font("DejaVu","",font_dir,uni=True)
-    pdf.add_font("DejaVu","B",font_dir,uni=True)
+
+    # Register DejaVu fonts BEFORE adding page
+    font_path="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if not os.path.exists(font_path):
+        os.makedirs("fonts", exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans.ttf",
+            "fonts/DejaVuSans.ttf"
+        )
+        font_path="fonts/DejaVuSans.ttf"
+
+    pdf.add_font("DejaVu","",font_path,uni=True)
+    pdf.add_font("DejaVu","B",font_path,uni=True)
+    pdf.add_font("DejaVu","I",font_path,uni=True)
 
     pdf.add_page()
     pdf.watermark()
@@ -152,7 +163,10 @@ def generate_pdf(ai,k,charts):
     pdf.set_font("DejaVu","",11)
     for line in ai.split("\n"):
         if line.strip():
-            pdf.multi_cell(0,7,line.strip())
+            try:
+                pdf.multi_cell(0,7,line.strip())
+            except Exception:
+                pdf.multi_cell(0,7,sanitize_text(line.strip()))
 
     for ch in charts:
         if os.path.exists(ch):
@@ -198,7 +212,7 @@ v=list(k["top_v"].keys());vals=list(k["top_v"].values())
 ax2.barh(v[::-1],vals[::-1],color="#2E7D32");ax2.set_xlabel("Amount")
 fig2.tight_layout();fig2.savefig("chart_vendors.png");charts.append("chart_vendors.png");st.pyplot(fig2)
 
-# Materials Bar (no overlap)
+# Materials Bar
 st.subheader("Top 10 Materials by Quantity")
 fig3,ax3=plt.subplots()
 m=list(k["top_m"].keys());q=list(k["top_m"].values())
