@@ -1,8 +1,6 @@
 # ==========================================================
 # SAP AUTOMATZ – Executive Procurement Analytics
-# Version: v33.0 (Procurement Risk Index)
-# Includes: cover page, watermark, Unicode-safe PDF, KPI tiles,
-# AI insights, charts, and Procurement Risk Index gauge.
+# Version: v33.1 (Fixes: Streamlit deprecation, PDF watermark/text, Risk breakdown)
 # ==========================================================
 
 import os, io, re, datetime, math
@@ -39,7 +37,8 @@ st.divider()
 
 # ------------------------- HELPERS -------------------------
 def sanitize_text(t):
-    return unidecode(str(t)) if t else ""
+    if t is None: return ""
+    return unidecode(str(t))
 
 def parse_amount_and_currency(v, fallback="INR"):
     if pd.isna(v): return 0.0, fallback
@@ -51,16 +50,17 @@ def parse_amount_and_currency(v, fallback="INR"):
         if sym in s:
             cur=c
             s=s.replace(sym,"")
-    s=re.sub(r"[^\d.\-]","",s)
+    s=re.sub(r"[^\d.\-]", "", s)
     try:
         amt=float(s)
     except:
         amt=0.0
-    return amt,cur
+    return amt, cur
 
 def clean_dataframe(df):
+    # Ensure currency col
     if "CURRENCY" not in df.columns:
-        df["CURRENCY"]="INR"
+        df["CURRENCY"] = "INR"
     amounts=[]; currencies=[]
     for _, row in df.iterrows():
         amt, cur = parse_amount_and_currency(row.get("AMOUNT", 0), row.get("CURRENCY", "INR"))
@@ -68,7 +68,6 @@ def clean_dataframe(df):
         currencies.append(cur)
     df["AMOUNT_NUM"] = amounts
     df["CURRENCY_DETECTED"] = currencies
-    # normalize vendor/material columns to strings
     if "VENDOR" in df.columns:
         df["VENDOR"] = df["VENDOR"].astype(str).fillna("Unknown")
     if "MATERIAL" in df.columns:
@@ -83,7 +82,6 @@ def compute_kpis(df):
     total_spend = float(sum(totals.values())) if totals else 0.0
     dominant = max(totals, key=totals.get) if totals else None
     top_v = df.groupby("VENDOR")["AMOUNT_NUM"].sum().nlargest(10).to_dict() if "VENDOR" in df.columns else {}
-    # materials by quantity (preferred) else by spend
     if "QUANTITY" in df.columns:
         top_m = df.groupby("MATERIAL")["QUANTITY"].sum().nlargest(10).to_dict()
     else:
@@ -97,87 +95,55 @@ def compute_kpis(df):
     return {"totals": totals, "total_spend": total_spend, "dominant": dominant,
             "top_v": top_v, "top_m": top_m, "monthly": monthly, "records": len(df), "df": df}
 
-# ------------------------- PROCUREMENT RISK INDEX -------------------------
+# Procurement risk same as earlier version (kept explainable)
 def compute_procurement_risk(df, kpis):
-    """
-    Score components (higher is better / lower risk):
-     - vendor_diversity_score (0-100): based on number of vendors and concentration
-     - vendor_concentration_score (0-100): lower share by top vendor => higher score
-     - currency_exposure_score (0-100): if single currency dominates => higher score
-     - monthly_volatility_score (0-100): high volatility => lower score
-
-    final_score = weighted sum (0-100). Then map to Low/Medium/High risk.
-    """
     df_local = kpis.get("df", df)
     totals = kpis.get("totals", {})
     total_spend = kpis.get("total_spend", 0.0)
-    # vendor metrics
     vendor_sums = df_local.groupby("VENDOR")["AMOUNT_NUM"].sum()
-    num_vendors = vendor_sums.size
+    num_vendors = vendor_sums.size if not vendor_sums.empty else 0
     top_vendor_share = (vendor_sums.max() / total_spend) if total_spend and not vendor_sums.empty else 1.0
-
-    # vendor_concentration_score: 100 -> very spread; 0 -> single vendor dominates
     vendor_concentration_score = max(0.0, (1.0 - top_vendor_share)) * 100
-
-    # vendor_diversity_score: more vendors increases score (cap at 100 vendors)
-    vendor_diversity_score = min(100.0, (num_vendors / 50.0) * 100.0)  # 50 vendors -> full score
-
-    # currency exposure: proportion of spend in dominant currency
+    vendor_diversity_score = min(100.0, (num_vendors / 50.0) * 100.0)
     if totals and total_spend:
         dominant = kpis.get("dominant")
         dominant_share = totals.get(dominant, 0.0) / total_spend if dominant else 1.0
-        currency_exposure_score = dominant_share * 100.0  # more dominant => better (lower multi-currency risk)
+        currency_exposure_score = dominant_share * 100.0
     else:
         currency_exposure_score = 100.0
-
-    # monthly volatility: use CV = std/mean of monthly spend; lower CV => better
     monthly = list(kpis.get("monthly", {}).values())
     if len(monthly) >= 3 and np.mean(monthly) > 0:
         cv = np.std(monthly) / (np.mean(monthly) + 1e-9)
-        monthly_volatility_score = max(0.0, 1.0 - min(cv, 2.0)) * 100.0  # cv >=2 => very volatile -> 0 score
+        monthly_volatility_score = max(0.0, 1.0 - min(cv, 2.0)) * 100.0
     else:
-        monthly_volatility_score = 80.0  # default decent score for insufficient data
-
-    # weights
-    w_conc = 0.4
-    w_div = 0.2
-    w_curr = 0.2
-    w_vol = 0.2
-
+        monthly_volatility_score = 80.0
+    w_conc = 0.4; w_div = 0.2; w_curr=0.2; w_vol=0.2
     final_score = (vendor_concentration_score * w_conc +
                    vendor_diversity_score * w_div +
                    currency_exposure_score * w_curr +
                    monthly_volatility_score * w_vol)
-
-    # normalize to 0-100
     final_score = float(max(0.0, min(100.0, final_score)))
-
-    # risk band (lower score => higher procurement risk)
     if final_score >= 67:
         band = "Low"
     elif final_score >= 34:
         band = "Medium"
     else:
         band = "High"
-
-    breakdown = {
-        "vendor_concentration_score": vendor_concentration_score,
-        "vendor_diversity_score": vendor_diversity_score,
-        "currency_exposure_score": currency_exposure_score,
-        "monthly_volatility_score": monthly_volatility_score,
-    }
+    breakdown = {"vendor_concentration_score": vendor_concentration_score,
+                 "vendor_diversity_score": vendor_diversity_score,
+                 "currency_exposure_score": currency_exposure_score,
+                 "monthly_volatility_score": monthly_volatility_score}
     return {"score": final_score, "band": band, "breakdown": breakdown, "num_vendors": num_vendors, "top_vendor_share": top_vendor_share}
 
-# ------------------------- AI HYBRID INSIGHTS -------------------------
-def generate_ai(kpis):
+# AI prompt function: increased token budget, sanitized
+def generate_ai(kpis, summary_only=False):
     totals_text = "\n".join([f"- {c}: {v:,.2f}" for c, v in kpis["totals"].items()]) if kpis["totals"] else "No currency totals."
     top_v_text = "\n".join([f"{i+1}. {v}: {amt:,.2f}" for i,(v,amt) in enumerate(kpis["top_v"].items())]) if kpis["top_v"] else "No vendor data."
-    top_m_text = "\n".join([f"{i+1}. {m}: {qty:,.0f}" for i,(m,qty) in enumerate(kpis["top_m"].items())]) if kpis["top_m"] else "No material data."
     prompt = f"""
-You are a procurement analytics expert. Use the computed KPIs below to craft:
-1) Executive Insights — 4-6 concise bullets.
-2) Recommendations — 4 short bullets focused on cost, vendor management, inventory, and currency risk.
-3) Key Action Points — 4-6 prioritized actions.
+You are a procurement analytics expert. Using the KPIs below, produce:
+1) Executive Insights — 4 to 6 concise bullets.
+2) Recommendations — 4 concise bullets.
+3) Key Action Points — 4 to 6 prioritized actions.
 
 KPI summary:
 Total records: {kpis['records']}
@@ -186,60 +152,100 @@ Totals by currency:
 {totals_text}
 Top vendors:
 {top_v_text}
-Top materials (by qty/spend):
-{top_m_text}
-Monthly trend sample: {', '.join(list(kpis['monthly'].keys())[:6]) if kpis['monthly'] else 'N/A'}
+Monthly sample: {', '.join(list(kpis['monthly'].keys())[:6]) if kpis['monthly'] else 'N/A'}
+
+Return the three sections clearly separated and use professional, actionable phrasing.
 """
     try:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[{"role":"system","content":"You are an expert procurement analyst."},{"role":"user","content":prompt}],
             temperature=0.2,
-            max_tokens=700
+            max_tokens=900
         )
         return sanitize_text(r.choices[0].message.content)
     except Exception as e:
         return f"AI Error: {e}"
 
-# ------------------------- PDF (Unicode-safe) -------------------------
+# ------------------------- PDF (Unicode-safe) with safer text writing -------------------------
 class PDF(FPDF):
     def header(self): pass
     def footer(self):
         self.set_y(-15)
-        self.set_font("DejaVu","I",8)
+        # ensure font exists; we'll register before using PDF
+        try:
+            self.set_font("DejaVu", "I", 8)
+        except:
+            self.set_font("Helvetica", "I", 8)
         self.set_text_color(130,130,130)
         self.cell(0,10,"© 2025 SAP Automatz – Executive Procurement Analytics",align="C")
 
+    # draw watermark very light and drawn BEFORE content usage
     def watermark(self, text="SAP Automatz – Automate • Analyze • Accelerate"):
-        self.set_text_color(240,240,240)
-        self.set_font("DejaVu","B",28)
+        # very light gray so it never competes with content
+        self.set_text_color(245,245,245)
+        try:
+            self.set_font("DejaVu", "B", 28)
+        except:
+            self.set_font("Helvetica", "B", 28)
+        # Draw rotation transform, then text, then reset
         self.rotate(45)
-        # center-ish position
-        self.text(25,150,text)
+        # center-ish placement
+        self.text(25, 150, text)
         self.rotate(0)
 
     def rotate(self, angle):
         if angle != 0:
-            self._out(f"q {math.cos(angle*math.pi/180):.5f} {math.sin(angle*math.pi/180):.5f} "
-                      f"{-math.sin(angle*math.pi/180):.5f} {math.cos(angle*math.pi/180):.5f} 0 0 cm")
+            self._out(f"q {math.cos(angle*math.pi/180):.6f} {math.sin(angle*math.pi/180):.6f} "
+                      f"{-math.sin(angle*math.pi/180):.6f} {math.cos(angle*math.pi/180):.6f} 0 0 cm")
         else:
             self._out("Q")
 
 def add_tile(pdf, x, y, w, h, title, value, color=(21,101,192)):
     pdf.set_fill_color(*color)
-    pdf.rect(x, y, w, h, "F")
+    pdf.rect(x,y,w,h,"F")
     pdf.set_text_color(255,255,255)
     pdf.set_xy(x+3, y+3)
-    pdf.set_font("DejaVu","B",11)
+    try:
+        pdf.set_font("DejaVu", "B", 11)
+    except:
+        pdf.set_font("Helvetica","B",11)
     pdf.cell(w-6,7, title, ln=True)
     pdf.set_xy(x+3, y+11)
-    pdf.set_font("DejaVu","",10)
+    try:
+        pdf.set_font("DejaVu","",10)
+    except:
+        pdf.set_font("Helvetica","",10)
     pdf.cell(w-6,6, str(value), ln=True)
+
+# safe multi-cell: chunk long lines and fallback to sanitized substring if needed
+def safe_multi_cell(pdf, w, h, text):
+    # split text into lines by newline, then chunk each long line
+    max_chunk = 500
+    for paragraph in str(text).split("\n"):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            pdf.ln(2); continue
+        # chunk
+        i = 0
+        while i < len(paragraph):
+            chunk = paragraph[i:i+max_chunk]
+            try:
+                pdf.multi_cell(w, h, chunk)
+            except Exception:
+                # fallback: try smaller chunk
+                try:
+                    pdf.multi_cell(w, h, chunk[:200])
+                except Exception:
+                    # last resort: write sanitized short text
+                    pdf.multi_cell(w, h, sanitize_text(chunk)[:150])
+                # continue
+            i += max_chunk
 
 def generate_pdf(ai_text, kpis, charts, company, summary_text, risk):
     pdf = PDF()
 
-    # Ensure DejaVu fonts registered
+    # Register fonts BEFORE any page operations
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if not os.path.exists(font_path):
         os.makedirs("fonts", exist_ok=True)
@@ -250,112 +256,151 @@ def generate_pdf(ai_text, kpis, charts, company, summary_text, risk):
         )
         font_path = "fonts/DejaVuSans.ttf"
 
-    pdf.add_font("DejaVu","",font_path,uni=True)
-    pdf.add_font("DejaVu","B",font_path,uni=True)
-    pdf.add_font("DejaVu","I",font_path,uni=True)
+    try:
+        pdf.add_font("DejaVu", "", font_path, uni=True)
+        pdf.add_font("DejaVu", "B", font_path, uni=True)
+        pdf.add_font("DejaVu", "I", font_path, uni=True)
+    except Exception:
+        # ignore if registration fails; FPDF will fallback
+        pass
 
-    # COVER PAGE
+    # -------- COVER PAGE (watermark drawn first so it is behind cover text)
     pdf.add_page()
-    pdf.image(LOGO_URL, x=70, y=18, w=70)
-    pdf.set_font("DejaVu","B",20)
+    pdf.watermark()
+    if os.path.exists(LOGO_URL) and LOGO_URL.startswith("http"):
+        # FPDF can't directly place remote images; ignore here - we place via local file if available
+        pass
+    # try to place logo via requests -> local temp if possible
+    try:
+        r = requests.get(LOGO_URL, timeout=10)
+        if r.status_code == 200:
+            with open("tmp_logo.png","wb") as f:
+                f.write(r.content)
+            pdf.image("tmp_logo.png", x=70, y=18, w=70)
+    except Exception:
+        # ignore logo fetch errors
+        pass
+
+    try:
+        pdf.set_font("DejaVu", "B", 20)
+    except:
+        pdf.set_font("Helvetica", "B", 20)
     pdf.ln(75)
-    pdf.cell(0,10,"Executive Procurement Analysis Report", align="C", ln=True)
-    pdf.set_font("DejaVu","",12)
+    pdf.cell(0,10, "Executive Procurement Analysis Report", align="C", ln=True)
+    try:
+        pdf.set_font("DejaVu", "", 12)
+    except:
+        pdf.set_font("Helvetica", "", 12)
     pdf.cell(0,8, f"Prepared for: {company}", align="C", ln=True)
     pdf.cell(0,8, f"Generated on: {datetime.date.today().strftime('%d %B %Y')}", align="C", ln=True)
     pdf.ln(10)
-    pdf.set_font("DejaVu","",11)
-    pdf.multi_cell(0,7, sanitize_text(summary_text))
-    pdf.watermark()
+    # summary_text may be long; use safe writing
+    try:
+        pdf.set_font("DejaVu","",11)
+    except:
+        pdf.set_font("Helvetica","",11)
+    safe_multi_cell(pdf, 0, 7, summary_text)
 
-    # KPI DASHBOARD PAGE
+    # -------- KPI DASHBOARD
     pdf.add_page()
     pdf.watermark()
     pdf.set_fill_color(26,35,126)
     pdf.rect(0,0,210,25,"F")
     pdf.set_text_color(255,255,255)
-    pdf.set_font("DejaVu","B",16)
+    try:
+        pdf.set_font("DejaVu","B",16)
+    except:
+        pdf.set_font("Helvetica","B",16)
     pdf.cell(0,15,"Executive Procurement Dashboard", align="C", ln=True)
     pdf.set_text_color(0,0,0)
-    pdf.ln(8)
+    pdf.ln(10)
+
     y = pdf.get_y()
     add_tile(pdf, 10, y, 50, 22, "Total Records", kpis["records"], (13,71,161))
     add_tile(pdf, 65, y, 70, 22, "Total Spend", f"{kpis['total_spend']:,.2f}", (21,101,192))
     add_tile(pdf, 140, y, 60, 22, "Dominant Currency", kpis["dominant"], (30,136,229))
     pdf.ln(36)
-    # add risk tile
-    add_tile(pdf, 10, pdf.get_y(), 70, 22, "Procurement Risk Index", f"{risk['score']:.0f} ({risk['band']})", (192,39,0) if risk['band']=="High" else ((242, 153, 74) if risk['band']=="Medium" else (56,142,60)))
-    pdf.ln(30)
+    # Risk tile
+    color_risk = (56,142,60) if risk["band"]=="Low" else ((242,153,74) if risk["band"]=="Medium" else (192,39,0))
+    add_tile(pdf, 10, pdf.get_y(), 85, 22, "Procurement Risk Index", f"{risk['score']:.0f} ({risk['band']})", color_risk)
+    pdf.ln(28)
 
-    # INSIGHTS PAGE
+    # -------- AI INSIGHTS
     pdf.add_page()
     pdf.watermark()
-    pdf.set_font("DejaVu","B",13)
+    try:
+        pdf.set_font("DejaVu","B",13)
+    except:
+        pdf.set_font("Helvetica","B",13)
     pdf.cell(0,10,"AI-Generated Executive Insights", ln=True)
-    pdf.set_font("DejaVu","",11)
-    for line in ai_text.split("\n"):
-        if line.strip():
-            try:
-                pdf.multi_cell(0,7, sanitize_text(line.strip()))
-            except Exception:
-                pdf.multi_cell(0,7, sanitize_text(line.strip()[:500]))
+    try:
+        pdf.set_font("DejaVu","",11)
+    except:
+        pdf.set_font("Helvetica","",11)
+    safe_multi_cell(pdf, 0, 7, ai_text)
 
-    # CHART PAGES (one per page)
+    # -------- RISK BREAKDOWN PAGE - write as full table lines
+    pdf.add_page()
+    pdf.watermark()
+    try:
+        pdf.set_font("DejaVu","B",13)
+    except:
+        pdf.set_font("Helvetica","B",13)
+    pdf.cell(0,10,"Procurement Risk – Breakdown", ln=True)
+    pdf.set_font("DejaVu","",11)
+    bd = risk["breakdown"]
+    for k,v in bd.items():
+        pdf.multi_cell(0,7, f"{k.replace('_',' ').title()}: {v:,.2f}")
+
+    # -------- CHARTS PAGES (one chart per page) - ensure enough margin
     for ch in charts:
         if os.path.exists(ch):
             pdf.add_page()
             pdf.watermark()
-            pdf.set_font("DejaVu","B",12)
+            try:
+                pdf.set_font("DejaVu","B",12)
+            except:
+                pdf.set_font("Helvetica","B",12)
             title = os.path.basename(ch).replace("_"," ").replace(".png","").title()
             pdf.cell(0,10, title, ln=True)
-            # image placement with top margin
-            pdf.image(ch, x=20, y=30, w=170)
-            pdf.ln(10)
+            # place image slightly down to keep header visible
+            try:
+                pdf.image(ch, x=18, y=35, w=174)
+            except Exception:
+                # fallback: small image
+                try:
+                    pdf.image(ch, x=30, y=40, w=150)
+                except:
+                    pass
 
+    # final output: use dest="S" and produce bytes safely (latin-1 ignore)
     pdf_bytes = pdf.output(dest="S").encode("latin-1", "ignore")
     return io.BytesIO(pdf_bytes)
 
-# ------------------------- GAUGE CHART -------------------------
+# ------------------------- GAUGE CHART (unchanged)
 def plot_risk_gauge(score, out_path="gauge_risk.png"):
-    """
-    Draw a semicircular gauge (0-100) where higher score = greener.
-    """
-    fig, ax = plt.subplots(figsize=(6,3), subplot_kw={'projection': None})
+    fig, ax = plt.subplots(figsize=(6,3))
     ax.axis('off')
-
-    # draw background semicircles colored by ranges
+    # colored bands
     angles = np.linspace(-np.pi, 0, 100)
-    radius = 1.0
-    cmap = [(1.0,0.2,0.2), (1.0,0.7,0.2), (0.2,0.7,0.2)]  # red, orange, green
-
-    # draw colored wedges
-    splits = [0, 33, 66, 100]
+    cmap = [(1.0,0.2,0.2), (1.0,0.7,0.2), (0.2,0.7,0.2)]
+    splits = [0,33,66,100]
     for i in range(len(splits)-1):
         start = -np.pi + (splits[i]/100.0)*np.pi
         end = -np.pi + (splits[i+1]/100.0)*np.pi
-        ax.add_patch(plt.Circle((0,0), radius+0.02, color='white'))  # base
         theta = np.linspace(start, end, 50)
-        xs = np.cos(theta)
-        ys = np.sin(theta)
+        xs = np.cos(theta); ys = np.sin(theta)
         ax.fill_between(xs, ys, -1.2, color=cmap[i], alpha=0.9)
-
-    # pointer
     theta_score = -np.pi + (score/100.0)*np.pi
-    x = 0.9 * math.cos(theta_score)
-    y = 0.9 * math.sin(theta_score)
-    ax.plot([0, x], [0, y], lw=4, color='k')
-
-    # center circle and text
+    x = 0.9 * math.cos(theta_score); y = 0.9 * math.sin(theta_score)
+    ax.plot([0,x],[0,y], lw=4, color='k')
     ax.scatter([0],[0], color='k', s=30)
     ax.text(0, -0.1, f"{score:.0f}", horizontalalignment='center', verticalalignment='center', fontsize=20, fontweight='bold')
-    ax.set_xlim(-1.2, 1.2)
-    ax.set_ylim(-1.2, 0.4)
-    plt.axis('off')
-    fig.savefig(out_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
+    ax.set_xlim(-1.2,1.2); ax.set_ylim(-1.2,0.4)
+    plt.axis('off'); fig.savefig(out_path, bbox_inches='tight', dpi=150); plt.close(fig)
     return out_path
 
-# ------------------------- UI / FLOW -------------------------
+# ------------------------- UI FLOW -------------------------
 st.title("📊 Executive Procurement Dashboard")
 company_name = st.text_input("Enter your Company / Client Name (for report cover):", "ABC Manufacturing Pvt Ltd")
 
@@ -376,71 +421,36 @@ except Exception as e:
     st.stop()
 
 kpis = compute_kpis(df)
-# compute risk
 risk = compute_procurement_risk(df, kpis)
-
-# Gauge chart
 gauge_path = plot_risk_gauge(risk['score'], out_path="gauge_risk.png")
 
-# Charts generation (currency, vendors, materials, monthly)
-charts = []
-# Currency pie
+# Build charts
+charts=[]
 if kpis["totals"]:
     fig, ax = plt.subplots(figsize=(5,4))
-    labels = list(kpis["totals"].keys())
-    vals = list(kpis["totals"].values())
-    ax.pie(vals, labels=labels, autopct="%1.1f%%", startangle=90)
-    ax.set_title("Currency Distribution")
-    fig.tight_layout()
-    cur_path = "chart_currency.png"
-    fig.savefig(cur_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    charts.append(cur_path)
-# Vendors bar
+    labels = list(kpis["totals"].keys()); vals = list(kpis["totals"].values())
+    ax.pie(vals, labels=labels, autopct="%1.1f%%", startangle=90); ax.set_title("Currency Distribution")
+    fig.tight_layout(); cur_path="chart_currency.png"; fig.savefig(cur_path, bbox_inches='tight', dpi=150); plt.close(fig); charts.append(cur_path)
 if kpis["top_v"]:
     fig, ax = plt.subplots(figsize=(8,4))
-    vendors = list(kpis["top_v"].keys())
-    vals = list(kpis["top_v"].values())
-    ax.barh(vendors[::-1], vals[::-1], color="#2E7D32")
-    ax.set_xlabel("Purchase Amount")
-    ax.set_title("Top Vendors by Spend")
-    fig.tight_layout()
-    vendor_path = "chart_vendors.png"
-    fig.savefig(vendor_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    charts.append(vendor_path)
-# Materials bar
+    vendors = list(kpis["top_v"].keys()); vals = list(kpis["top_v"].values())
+    ax.barh(vendors[::-1], vals[::-1], color="#2E7D32"); ax.set_xlabel("Purchase Amount"); ax.set_title("Top Vendors by Spend")
+    fig.tight_layout(); vendor_path="chart_vendors.png"; fig.savefig(vendor_path, bbox_inches='tight', dpi=150); plt.close(fig); charts.append(vendor_path)
 if kpis["top_m"]:
     fig, ax = plt.subplots(figsize=(8,4))
-    mats = list(kpis["top_m"].keys())
-    q = list(kpis["top_m"].values())
-    ax.bar(mats, q, color="#1565C0")
-    plt.xticks(rotation=45, ha='right')
-    ax.set_title("Top Materials by Quantity/Spend")
-    fig.tight_layout()
-    mat_path = "chart_materials.png"
-    fig.savefig(mat_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    charts.append(mat_path)
-# Monthly trend
+    mats = list(kpis["top_m"].keys()); qtys = list(kpis["top_m"].values())
+    ax.bar(mats, qtys, color="#1565C0"); plt.xticks(rotation=45, ha='right'); ax.set_title("Top Materials by Quantity/Spend")
+    fig.tight_layout(); mat_path="chart_materials.png"; fig.savefig(mat_path, bbox_inches='tight', dpi=150); plt.close(fig); charts.append(mat_path)
 if kpis["monthly"]:
     fig, ax = plt.subplots(figsize=(9,3))
-    months = list(kpis["monthly"].keys())
-    vals = list(kpis["monthly"].values())
-    ax.plot(months, vals, marker='o')
-    ax.set_title("Monthly Purchase Trend")
-    ax.set_ylabel("Spend")
-    plt.xticks(rotation=45, ha='right')
-    fig.tight_layout()
-    monthly_path = "chart_monthly.png"
-    fig.savefig(monthly_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    charts.append(monthly_path)
+    months = list(kpis["monthly"].keys()); vals = list(kpis["monthly"].values())
+    ax.plot(months, vals, marker='o'); ax.set_title("Monthly Purchase Trend"); ax.set_ylabel("Spend"); plt.xticks(rotation=45, ha='right')
+    fig.tight_layout(); monthly_path="chart_monthly.png"; fig.savefig(monthly_path, bbox_inches='tight', dpi=150); plt.close(fig); charts.append(monthly_path)
 
-# include gauge as first chart
+# insert gauge first
 charts.insert(0, gauge_path)
 
-# Show KPI cards in UI
+# UI cards (metric font tweak)
 st.markdown("<style>.stMetric label{font-size:12px !important}</style>", unsafe_allow_html=True)
 c1,c2,c3,c4,c5 = st.columns([1,1,1,1,1])
 c1.metric("Total Records", kpis["records"])
@@ -452,20 +462,25 @@ c5.metric("Top Vendor", next(iter(kpis["top_v"]), "N/A"))
 st.subheader("Visual Highlights")
 for ch in charts:
     try:
-        st.image(ch, use_column_width=True)
-    except:
+        st.image(ch, use_container_width=True)
+    except Exception:
         pass
+
+# Show risk breakdown as a clean table, not a code blob
+st.subheader("Procurement Risk – Breakdown")
+bd_df = pd.DataFrame.from_dict(risk["breakdown"], orient="index", columns=["Score"]).reset_index().rename(columns={"index":"Metric"})
+st.table(bd_df)
 
 st.subheader("AI Insights")
 ai_text = generate_ai(kpis)
-st.markdown(ai_text.replace("\n","  \n"))
+# ensure AI summary is not truncated on the UI; show full
+st.markdown(ai_text.replace("\n", "  \n"))
 
-# Generate cover summary (short)
-summary_ai = generate_ai(kpis)[:800]  # short snippet for cover
-
+# Cover summary and PDF
+summary_ai = generate_ai(kpis)[:1200]  # short snippet for cover
 pdf_buffer = generate_pdf(ai_text, kpis, charts, company_name, summary_ai, risk)
-st.download_button("📄 Download Full Executive Report (with Procurement Risk Index)", pdf_buffer, "SAP_Automatz_Executive_Report.pdf", "application/pdf")
+st.download_button("📄 Download Full Executive Report (with Cover Page)", pdf_buffer, "SAP_Automatz_Executive_Report.pdf", "application/pdf")
 
-# Also display breakdown of risk components
-st.markdown("### Procurement Risk – Breakdown")
-st.json(risk)
+# also offer risk CSV download for evidence
+bd_csv = bd_df.to_csv(index=False).encode("utf-8")
+st.download_button("📥 Download Risk Breakdown (CSV)", bd_csv, "risk_breakdown.csv", "text/csv")
