@@ -1,9 +1,9 @@
 # ==========================================================
 # SAP AUTOMATZ – Executive Procurement Analytics (ERP-Compatible)
-# Version: v31.2 (Full Unicode Safe + Watermark + Registered Fonts)
+# Version: v32.0 (Cover Page + Watermark + AI Summary)
 # ==========================================================
 
-import os, io, re, datetime, platform, requests, math
+import os, io, re, datetime, math, requests
 import pandas as pd, numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -80,16 +80,16 @@ def compute_kpis(df):
     return {"totals":totals,"total_spend":total_spend,"dominant":dominant,
             "top_v":top_v,"top_m":top_m,"monthly":monthly,"records":len(df)}
 
-def generate_ai(k):
+def generate_ai(k, summary_only=False):
     prompt=f"""Provide concise procurement insights based on:
 Totals {k['totals']}, top vendors {list(k['top_v'].keys())[:5]}, top materials {list(k['top_m'].keys())[:5]}, months {list(k['monthly'].keys())[:6]}.
-Return three sections: Executive Insights, Recommendations, Key Action Points."""
+Return {'only 3-4 summary lines' if summary_only else 'sections: Executive Insights, Recommendations, and Key Action Points'}."""
     try:
         r=client.chat.completions.create(model=MODEL,messages=[{"role":"user","content":prompt}],temperature=0.3,max_tokens=400)
         return sanitize_text(r.choices[0].message.content)
     except Exception as e: return f"AI Error: {e}"
 
-# ------------------------- PDF WITH WATERMARK -------------------------
+# ------------------------- PDF CLASS -------------------------
 class PDF(FPDF):
     def header(self): pass
     def footer(self):
@@ -99,7 +99,7 @@ class PDF(FPDF):
         self.cell(0,10,"© 2025 SAP Automatz – Executive Procurement Analytics",align="C")
 
     def watermark(self):
-        self.set_text_color(200,200,200)
+        self.set_text_color(220,220,220)
         self.set_font("DejaVu","B",32)
         self.rotate(45)
         self.text(25,150,"SAP Automatz – Automate • Analyze • Accelerate")
@@ -123,10 +123,10 @@ def add_tile(pdf,x,y,w,h,title,value,color):
     pdf.set_font("DejaVu","",10)
     pdf.cell(w-6,6,str(value),ln=True)
 
-def generate_pdf(ai,k,charts):
+def generate_pdf(ai,k,charts,company,summary_text):
     pdf=PDF()
 
-    # Register DejaVu fonts BEFORE adding page
+    # Register DejaVu fonts
     font_path="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if not os.path.exists(font_path):
         os.makedirs("fonts", exist_ok=True)
@@ -141,14 +141,28 @@ def generate_pdf(ai,k,charts):
     pdf.add_font("DejaVu","B",font_path,uni=True)
     pdf.add_font("DejaVu","I",font_path,uni=True)
 
+    # ----------- COVER PAGE -----------
     pdf.add_page()
+    pdf.image(LOGO_URL, x=70, y=20, w=70)
+    pdf.set_font("DejaVu","B",20)
+    pdf.ln(70)
+    pdf.cell(0,10,"Executive Procurement Analysis Report",align="C",ln=True)
+    pdf.set_font("DejaVu","",13)
+    pdf.cell(0,10,f"Prepared for: {company}",align="C",ln=True)
+    pdf.cell(0,10,f"Generated on: {datetime.date.today().strftime('%d %B %Y')}",align="C",ln=True)
+    pdf.ln(15)
+    pdf.set_font("DejaVu","",11)
+    pdf.multi_cell(0,7,summary_text)
     pdf.watermark()
 
+    # ----------- KPI PAGE -----------
+    pdf.add_page()
+    pdf.watermark()
     pdf.set_fill_color(26,35,126)
     pdf.rect(0,0,210,25,"F")
     pdf.set_text_color(255,255,255)
     pdf.set_font("DejaVu","B",16)
-    pdf.cell(0,15,"Executive Procurement Report",align="C",ln=True)
+    pdf.cell(0,15,"Executive Procurement Dashboard",align="C",ln=True)
     pdf.ln(12)
     pdf.set_text_color(0,0,0)
 
@@ -158,16 +172,14 @@ def generate_pdf(ai,k,charts):
     add_tile(pdf,140,y,60,22,"Dominant Currency",k["dominant"],(30,136,229))
     pdf.ln(35)
 
+    # ----------- INSIGHTS -----------
     pdf.set_font("DejaVu","B",13)
-    pdf.cell(0,10,"Executive Insights & Recommendations",ln=True)
+    pdf.cell(0,10,"AI-Generated Insights & Recommendations",ln=True)
     pdf.set_font("DejaVu","",11)
     for line in ai.split("\n"):
-        if line.strip():
-            try:
-                pdf.multi_cell(0,7,line.strip())
-            except Exception:
-                pdf.multi_cell(0,7,sanitize_text(line.strip()))
+        if line.strip(): pdf.multi_cell(0,7,sanitize_text(line.strip()))
 
+    # ----------- CHARTS -----------
     for ch in charts:
         if os.path.exists(ch):
             pdf.add_page()
@@ -176,17 +188,16 @@ def generate_pdf(ai,k,charts):
             pdf.cell(0,10,os.path.basename(ch).replace("_"," ").title(),ln=True)
             pdf.image(ch,x=20,w=170)
 
-    buffer = io.BytesIO()
-    pdf.output(buffer)
-    buffer.seek(0)
-    return buffer
+    pdf_bytes = pdf.output(dest="S").encode("latin-1", "ignore")
+    return io.BytesIO(pdf_bytes)
 
 # ------------------------- STREAMLIT UI -------------------------
 st.title("📊 Executive Procurement Dashboard")
-st.caption("Upload your SAP/ERP extract to view insights and export branded PDF report.")
+company_name = st.text_input("Enter your Company / Client Name (for report cover):", "ABC Manufacturing Pvt Ltd")
 
 f=st.file_uploader("Upload CSV or XLSX",type=["csv","xlsx"])
 if not f: st.stop()
+
 df=pd.read_excel(f) if f.name.endswith(".xlsx") else pd.read_csv(f)
 k=compute_kpis(df)
 
@@ -198,28 +209,23 @@ c3.metric("Top Vendor",next(iter(k["top_v"]), "N/A"))
 c4.metric("Top Material",next(iter(k["top_m"]), "N/A"))
 
 charts=[]
-
-# Currency Pie
 st.subheader("Currency Distribution")
 fig1,ax1=plt.subplots()
 ax1.pie(list(k["totals"].values()),labels=list(k["totals"].keys()),autopct="%1.1f%%")
 fig1.tight_layout();fig1.savefig("chart_currency.png");charts.append("chart_currency.png");st.pyplot(fig1)
 
-# Vendors Bar
 st.subheader("Top 10 Vendors by Purchase Amount")
 fig2,ax2=plt.subplots()
 v=list(k["top_v"].keys());vals=list(k["top_v"].values())
 ax2.barh(v[::-1],vals[::-1],color="#2E7D32");ax2.set_xlabel("Amount")
 fig2.tight_layout();fig2.savefig("chart_vendors.png");charts.append("chart_vendors.png");st.pyplot(fig2)
 
-# Materials Bar
 st.subheader("Top 10 Materials by Quantity")
 fig3,ax3=plt.subplots()
 m=list(k["top_m"].keys());q=list(k["top_m"].values())
 ax3.bar(m,q,color="#1565C0");plt.xticks(rotation=45,ha='right')
 fig3.tight_layout();fig3.savefig("chart_materials.png");charts.append("chart_materials.png");st.pyplot(fig3)
 
-# Monthly Trend
 if k["monthly"]:
     st.subheader("Monthly Purchase Trend")
     fig4,ax4=plt.subplots()
@@ -229,8 +235,9 @@ if k["monthly"]:
     fig4.savefig("chart_monthly.png");charts.append("chart_monthly.png");st.pyplot(fig4)
 
 st.markdown("### AI Insights")
-ai=generate_ai(k)
+summary_ai = generate_ai(k, summary_only=True)
+ai = generate_ai(k)
 st.markdown(ai.replace("\n","  \n"))
 
-pdf=generate_pdf(ai,k,charts)
-st.download_button("📄 Download Watermarked PDF Report",pdf,"SAP_Automatz_Executive_Report.pdf","application/pdf")
+pdf=generate_pdf(ai,k,charts,company_name,summary_ai)
+st.download_button("📄 Download Full Executive Report (with Cover Page)",pdf,"SAP_Automatz_Executive_Report.pdf","application/pdf")
