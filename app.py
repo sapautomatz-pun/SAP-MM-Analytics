@@ -1,6 +1,6 @@
 # ==========================================================
 # SAP AUTOMATZ – Executive Procurement Analytics
-# Version: v38.0 (Summary of Findings + Final Layout Polish)
+# Version: v38.1 (Font Fix + Signature + Final Polished Report)
 # ==========================================================
 
 import os, io, re, datetime, math, urllib.request
@@ -22,10 +22,14 @@ VALID_KEYS = ["SAPMM-00000000000000", "DEMO-ACCESS-12345"]
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------------- STREAMLIT PAGE ----------------
-st.set_page_config(page_title="SAP Automatz – Executive Procurement Analytics", page_icon="📊", layout="wide")
+st.set_page_config(
+    page_title="SAP Automatz – Executive Procurement Analytics",
+    page_icon="📊",
+    layout="wide"
+)
 st.markdown("<style>.stApp header{visibility:hidden}</style>", unsafe_allow_html=True)
 
-col1, col2 = st.columns([1,3])
+col1, col2 = st.columns([1, 3])
 with col1:
     st.image(LOGO_URL, width=140)
 with col2:
@@ -55,31 +59,40 @@ if not st.session_state.verified:
     st.stop()
 
 # ---------------- HELPERS ----------------
-def sanitize_text(t): return unidecode(str(t)) if t else ""
+def sanitize_text(t): 
+    return unidecode(str(t)) if t else ""
 
 def parse_amount_and_currency(v, fallback="INR"):
     if pd.isna(v): return 0.0, fallback
     if isinstance(v, (int, float, np.number)): return float(v), fallback
     s = str(v)
-    sym_map = {"₹":"INR","Rs":"INR","$":"USD","USD":"USD","€":"EUR","EUR":"EUR"}
+    sym_map = {"₹": "INR", "Rs": "INR", "$": "USD", "USD": "USD", "€": "EUR", "EUR": "EUR"}
     cur = fallback
     for sym, c in sym_map.items():
         if sym in s:
-            cur = c; s = s.replace(sym, "")
+            cur = c
+            s = s.replace(sym, "")
     s = re.sub(r"[^\d.\-]", "", s)
-    try: amt = float(s)
-    except: amt = 0.0
+    try:
+        amt = float(s)
+    except:
+        amt = 0.0
     return amt, cur
 
 def clean_dataframe(df):
-    if "CURRENCY" not in df.columns: df["CURRENCY"] = "INR"
+    if "CURRENCY" not in df.columns:
+        df["CURRENCY"] = "INR"
     amt, cur = [], []
     for _, r in df.iterrows():
         a, c = parse_amount_and_currency(r.get("AMOUNT", 0), r.get("CURRENCY", "INR"))
-        amt.append(a); cur.append(c)
-    df["AMOUNT_NUM"] = amt; df["CURRENCY_DETECTED"] = cur
-    if "VENDOR" in df.columns: df["VENDOR"] = df["VENDOR"].astype(str).fillna("Unknown")
-    if "MATERIAL" in df.columns: df["MATERIAL"] = df["MATERIAL"].astype(str).fillna("Unknown")
+        amt.append(a)
+        cur.append(c)
+    df["AMOUNT_NUM"] = amt
+    df["CURRENCY_DETECTED"] = cur
+    if "VENDOR" in df.columns:
+        df["VENDOR"] = df["VENDOR"].astype(str).fillna("Unknown")
+    if "MATERIAL" in df.columns:
+        df["MATERIAL"] = df["MATERIAL"].astype(str).fillna("Unknown")
     return df
 
 def compute_kpis(df):
@@ -100,10 +113,17 @@ def compute_kpis(df):
         if not d.empty:
             d["YM"] = d["PO_DATE"].dt.to_period("M").astype(str)
             monthly = d.groupby("YM")["AMOUNT_NUM"].sum().to_dict()
-    return {"totals": totals, "total_spend": total_spend, "dominant": dominant,
-            "top_v": top_v, "top_m": top_m, "monthly": monthly, "records": len(df), "df": df}
+    return {
+        "totals": totals,
+        "total_spend": total_spend,
+        "dominant": dominant,
+        "top_v": top_v,
+        "top_m": top_m,
+        "monthly": monthly,
+        "records": len(df),
+        "df": df
+    }
 
-# ---------------- RISK ----------------
 def compute_procurement_risk(df, k):
     df_local = k.get("df", df)
     totals = k.get("totals", {})
@@ -111,42 +131,49 @@ def compute_procurement_risk(df, k):
     v = df_local.groupby("VENDOR")["AMOUNT_NUM"].sum()
     nv = v.size if not v.empty else 0
     top_share = (v.max()/total_spend) if total_spend and not v.empty else 1.0
-    v_conc = max(0.0, (1.0-top_share))*100
-    v_div = min(100.0, (nv/50)*100)
+    v_conc = max(0.0, (1.0 - top_share)) * 100
+    v_div = min(100.0, (nv / 50) * 100)
     if totals and total_spend:
         dom = k.get("dominant")
         dom_share = totals.get(dom, 0.0)/total_spend if dom else 1.0
-        c_expo = dom_share*100
-    else: c_expo = 100.0
+        c_expo = dom_share * 100
+    else:
+        c_expo = 100.0
     mvals = list(k.get("monthly", {}).values())
     if len(mvals) >= 3 and np.mean(mvals) > 0:
         cv = np.std(mvals)/(np.mean(mvals)+1e-9)
         m_vol = max(0.0, 1-min(cv, 2))*100
-    else: m_vol = 80.0
-    score = v_conc*0.25+v_div*0.25+c_expo*0.25+m_vol*0.25
+    else:
+        m_vol = 80.0
+    score = v_conc*0.25 + v_div*0.25 + c_expo*0.25 + m_vol*0.25
     score = float(max(0.0, min(100.0, score)))
-    band = "Low" if score>=67 else ("Medium" if score>=34 else "High")
-    return {"score":score,"band":band,"breakdown":{
-        "Vendor Concentration":v_conc,
-        "Vendor Diversity":v_div,
-        "Currency Exposure":c_expo,
-        "Monthly Volatility":m_vol}}
+    band = "Low" if score >= 67 else ("Medium" if score >= 34 else "High")
+    return {
+        "score": score,
+        "band": band,
+        "breakdown": {
+            "Vendor Concentration": v_conc,
+            "Vendor Diversity": v_div,
+            "Currency Exposure": c_expo,
+            "Monthly Volatility": m_vol
+        }
+    }
 
-# ---------------- AI ----------------
 def generate_ai(k):
     try:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role":"system","content":"You are a procurement analytics expert."},
-                {"role":"user","content":f"Provide clear executive insights, key recommendations, and action items for dataset:\n{k}"}
+                {"role": "system", "content": "You are a procurement analytics expert."},
+                {"role": "user", "content": f"Provide clear executive insights, key recommendations, and action items for dataset:\n{k}"}
             ],
-            temperature=0.2,max_tokens=800)
+            temperature=0.2, max_tokens=800
+        )
         return sanitize_text(r.choices[0].message.content)
     except Exception as e:
         return f"AI Error: {e}"
 
-# ---------------- RISK GAUGE ----------------
+# ---------------- GAUGE ----------------
 def plot_risk_gauge(score, path="gauge_risk.png"):
     fig, ax = plt.subplots(figsize=(6,3))
     ax.axis("off")
@@ -165,169 +192,192 @@ def plot_risk_gauge(score, path="gauge_risk.png"):
     ax.set_xlim(-1.2,1.2);ax.set_ylim(-1.2,0.5)
     fig.savefig(path,bbox_inches="tight",dpi=150);plt.close(fig)
     return path
-
-# ---------------- PDF ----------------
+# ---------------- PDF CLASS ----------------
 class PDF(FPDF):
-    def header(self): pass
+    def header(self): 
+        pass
+
     def footer(self):
         self.set_y(-15)
-        self.set_font("DejaVu","I",8)
-        self.set_text_color(120,120,120)
-        self.cell(0,10,f"SAP Automatz Confidential | Page {self.page_no()} of {{nb}}",0,0,"C")
+        self.set_font("DejaVu", "I", 8)
+        self.set_text_color(120, 120, 120)
+        self.cell(0, 10, f"SAP Automatz Confidential | Page {self.page_no()} of {{nb}}", 0, 0, "C")
 
     def rect_tile(self, x, y, w, h, color, title, value):
         self.set_fill_color(*color)
         self.rect(x, y, w, h, "F")
-        self.set_xy(x+3, y+4)
+        self.set_xy(x + 3, y + 4)
         self.set_text_color(255, 255, 255)
         self.set_font("DejaVu", "B", 12)
-        self.cell(w-6, 6, title, ln=True)
-        self.set_xy(x+3, y+12)
+        self.cell(w - 6, 6, title, ln=True)
+        self.set_xy(x + 3, y + 12)
         self.set_font("DejaVu", "", 11)
-        self.cell(w-6, 6, str(value))
+        self.cell(w - 6, 6, str(value))
 
+# ---------------- PDF GENERATION ----------------
 def generate_pdf(ai_text, kpis, charts, company, summary_text, risk):
     pdf = PDF()
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Font setup (Regular, Bold, Italic)
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    italic_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"
+
     if not os.path.exists(font_path):
         os.makedirs("fonts", exist_ok=True)
         urllib.request.urlretrieve(
             "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans.ttf",
-            "fonts/DejaVuSans.ttf")
+            "fonts/DejaVuSans.ttf"
+        )
         font_path = "fonts/DejaVuSans.ttf"
 
-    pdf.add_font("DejaVu","",font_path,uni=True)
-    pdf.add_font("DejaVu","B",font_path,uni=True)
-    pdf.set_font("DejaVu","",11)
+    if not os.path.exists(italic_path):
+        urllib.request.urlretrieve(
+            "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans-Oblique.ttf",
+            "fonts/DejaVuSans-Oblique.ttf"
+        )
+        italic_path = "fonts/DejaVuSans-Oblique.ttf"
 
-    # Cover Page
+    pdf.add_font("DejaVu", "", font_path, uni=True)
+    pdf.add_font("DejaVu", "B", font_path, uni=True)
+    pdf.add_font("DejaVu", "I", italic_path, uni=True)
+    pdf.set_font("DejaVu", "", 11)
+
+    # 1️⃣ Cover Page
     pdf.add_page()
-    pdf.set_font("DejaVu","B",20)
-    pdf.cell(0,15,"Executive Procurement Analysis Report",ln=True,align="C")
+    pdf.set_font("DejaVu", "B", 20)
+    pdf.cell(0, 15, "Executive Procurement Analysis Report", ln=True, align="C")
     pdf.ln(8)
-    pdf.set_font("DejaVu","",12)
-    pdf.cell(0,8,f"Prepared for: {company}",ln=True,align="C")
-    pdf.cell(0,8,f"Generated on: {datetime.date.today().strftime('%d %B %Y')}",ln=True,align="C")
+    pdf.set_font("DejaVu", "", 12)
+    pdf.cell(0, 8, f"Prepared for: {company}", ln=True, align="C")
+    pdf.cell(0, 8, f"Generated on: {datetime.date.today().strftime('%d %B %Y')}", ln=True, align="C")
     pdf.ln(15)
-    pdf.multi_cell(0,7,summary_text)
+    pdf.multi_cell(0, 7, summary_text)
     pdf.image(LOGO_URL, x=160, y=260, w=30)
 
-    # KPI Summary Page
+    # 2️⃣ KPI Summary
     pdf.add_page()
-    pdf.set_font("DejaVu","B",14)
-    pdf.cell(0,10,"Executive Dashboard Overview",ln=True,align="C")
+    pdf.set_font("DejaVu", "B", 14)
+    pdf.cell(0, 10, "Executive Dashboard Overview", ln=True, align="C")
     y = pdf.get_y() + 5
-    pdf.rect_tile(10,y,60,20,(33,150,243),"Total Spend",f"{kpis['total_spend']:,.2f}")
-    pdf.rect_tile(75,y,60,20,(76,175,80),"Top Vendor",next(iter(kpis["top_v"]),"N/A"))
-    pdf.rect_tile(140,y,60,20,(255,167,38),"Currency",kpis.get("dominant","INR"))
-    pdf.rect_tile(10,y+28,190,20,(229,57,53),"Risk Index",f"{risk['score']:.0f} ({risk['band']})")
+    pdf.rect_tile(10, y, 60, 20, (33, 150, 243), "Total Spend", f"{kpis['total_spend']:,.2f}")
+    pdf.rect_tile(75, y, 60, 20, (76, 175, 80), "Top Vendor", next(iter(kpis["top_v"]), "N/A"))
+    pdf.rect_tile(140, y, 60, 20, (255, 167, 38), "Currency", kpis.get("dominant", "INR"))
+    pdf.rect_tile(10, y + 28, 190, 20, (229, 57, 53), "Risk Index", f"{risk['score']:.0f} ({risk['band']})")
 
-    # AI Insights Page
+    # 3️⃣ AI Insights
     pdf.add_page()
-    pdf.set_font("DejaVu","B",14)
-    pdf.cell(0,10,"AI-Generated Executive Insights",ln=True)
-    pdf.set_font("DejaVu","",11)
-    pdf.multi_cell(0,7,ai_text)
+    pdf.set_font("DejaVu", "B", 14)
+    pdf.cell(0, 10, "AI-Generated Executive Insights", ln=True)
+    pdf.set_font("DejaVu", "", 11)
+    pdf.multi_cell(0, 7, ai_text)
 
-    # Risk Breakdown Page
+    # 4️⃣ Risk Breakdown
     pdf.add_page()
-    pdf.set_font("DejaVu","B",13)
-    pdf.cell(0,10,"Procurement Risk Breakdown",ln=True)
-    pdf.set_font("DejaVu","",11)
-    for kx,vx in risk["breakdown"].items():
-        pdf.cell(0,8,f"{kx}: {vx:,.2f}",ln=True)
+    pdf.set_font("DejaVu", "B", 13)
+    pdf.cell(0, 10, "Procurement Risk Breakdown", ln=True)
+    pdf.set_font("DejaVu", "", 11)
+    for kx, vx in risk["breakdown"].items():
+        pdf.cell(0, 8, f"{kx}: {vx:,.2f}", ln=True)
 
-    # Charts Pages
+    # 5️⃣ Charts
     for ch in charts:
         if os.path.exists(ch):
             pdf.add_page()
-            title=os.path.basename(ch).replace("_"," ").replace(".png","").title()
-            pdf.set_font("DejaVu","B",12)
-            pdf.cell(0,10,title,ln=True)
-            pdf.image(ch,x=20,y=35,w=170)
+            title = os.path.basename(ch).replace("_", " ").replace(".png", "").title()
+            pdf.set_font("DejaVu", "B", 12)
+            pdf.cell(0, 10, title, ln=True)
+            pdf.image(ch, x=20, y=35, w=170)
 
-    # Summary of Findings
+    # 6️⃣ Summary of Findings + Signature
     pdf.add_page()
-    pdf.set_font("DejaVu","B",14)
-    pdf.cell(0,10,"Summary of Findings",ln=True)
-    pdf.set_font("DejaVu","",11)
+    pdf.set_font("DejaVu", "B", 14)
+    pdf.cell(0, 10, "Summary of Findings", ln=True)
+    pdf.set_font("DejaVu", "", 11)
     pdf.ln(4)
-    pdf.multi_cell(0,7,
+    pdf.multi_cell(
+        0, 7,
         f"• Total Spend: {kpis['total_spend']:,.2f} {kpis['dominant']}\n"
         f"• Risk Score: {risk['score']:.0f} ({risk['band']})\n"
-        f"• Top Vendor: {next(iter(kpis['top_v']),'N/A')}\n\n"
+        f"• Top Vendor: {next(iter(kpis['top_v']), 'N/A')}\n\n"
         f"Key Recommendations:\n{ai_text[:500]}\n\n"
         "For sustained procurement excellence, focus on vendor diversification, currency risk mitigation, "
-        "and inventory optimization. SAP Automatz AI analytics will continue monitoring trends dynamically."
+        "and inventory optimization.\n\n"
+        "_____________________________\n"
+        "Prepared by: SAP Automatz AI Suite\n"
+        "Empowering Intelligent Procurement Transformation."
     )
 
-    return io.BytesIO(pdf.output(dest="S").encode("latin-1","ignore"))
+    return io.BytesIO(pdf.output(dest="S").encode("latin-1", "ignore"))
 
 # ---------------- MAIN APP ----------------
 st.title("📊 Executive Procurement Dashboard")
-company=st.text_input("Enter Company Name:","ABC Manufacturing Pvt Ltd")
-f=st.file_uploader("Upload CSV/XLSX",type=["csv","xlsx"])
-if not f: st.stop()
+company = st.text_input("Enter Company Name:", "ABC Manufacturing Pvt Ltd")
+f = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx"])
+if not f:
+    st.stop()
 
-df=pd.read_excel(f) if f.name.endswith(".xlsx") else pd.read_csv(f)
-k=compute_kpis(df)
-risk=compute_procurement_risk(df,k)
-gauge=plot_risk_gauge(risk["score"])
-charts=[gauge]
+df = pd.read_excel(f) if f.name.endswith(".xlsx") else pd.read_csv(f)
+k = compute_kpis(df)
+risk = compute_procurement_risk(df, k)
+gauge = plot_risk_gauge(risk["score"])
+charts = [gauge]
 
-# Charts
-if k["totals"] and sum(k["totals"].values())>0:
-    fig,ax=plt.subplots()
-    ax.pie(k["totals"].values(),labels=k["totals"].keys(),autopct="%1.1f%%",startangle=90)
+# ------------- Charts -------------
+if k["totals"] and sum(k["totals"].values()) > 0:
+    fig, ax = plt.subplots()
+    ax.pie(k["totals"].values(), labels=k["totals"].keys(), autopct="%1.1f%%", startangle=90)
     ax.set_title("Currency Distribution")
-    fig.savefig("chart_currency.png",bbox_inches="tight",dpi=150)
+    fig.savefig("chart_currency.png", bbox_inches="tight", dpi=150)
     plt.close(fig)
     charts.append("chart_currency.png")
 
 if k["top_v"]:
-    fig,ax=plt.subplots()
-    ax.barh(list(k["top_v"].keys())[::-1],list(k["top_v"].values())[::-1],color="#2E7D32")
+    fig, ax = plt.subplots()
+    ax.barh(list(k["top_v"].keys())[::-1], list(k["top_v"].values())[::-1], color="#2E7D32")
     ax.set_title("Top Vendors by Spend")
-    fig.savefig("chart_vendors.png",bbox_inches="tight",dpi=150)
+    fig.savefig("chart_vendors.png", bbox_inches="tight", dpi=150)
     plt.close(fig)
     charts.append("chart_vendors.png")
 
 if k["top_m"]:
-    fig,ax=plt.subplots()
-    ax.bar(list(k["top_m"].keys()),list(k["top_m"].values()),color="#1565C0")
-    plt.xticks(rotation=45,ha="right")
+    fig, ax = plt.subplots()
+    ax.bar(list(k["top_m"].keys()), list(k["top_m"].values()), color="#1565C0")
+    plt.xticks(rotation=45, ha="right")
     ax.set_title("Top Materials by Quantity/Spend")
-    fig.savefig("chart_materials.png",bbox_inches="tight",dpi=150)
+    fig.savefig("chart_materials.png", bbox_inches="tight", dpi=150)
     plt.close(fig)
     charts.append("chart_materials.png")
 
-if k["monthly"] and sum(k["monthly"].values())>0:
-    fig,ax=plt.subplots()
-    ax.plot(list(k["monthly"].keys()),list(k["monthly"].values()),marker="o")
-    plt.xticks(rotation=45,ha="right")
+if k["monthly"] and sum(k["monthly"].values()) > 0:
+    fig, ax = plt.subplots()
+    ax.plot(list(k["monthly"].keys()), list(k["monthly"].values()), marker="o")
+    plt.xticks(rotation=45, ha="right")
     ax.set_title("Monthly Purchase Trend")
-    fig.savefig("chart_monthly.png",bbox_inches="tight",dpi=150)
+    fig.savefig("chart_monthly.png", bbox_inches="tight", dpi=150)
     plt.close(fig)
     charts.append("chart_monthly.png")
 
-# KPI Section
-c1,c2,c3,c4=st.columns(4)
-c1.metric("Records",k["records"])
-c2.metric("Spend",f"{k['total_spend']:,.2f} {k['dominant']}")
-c3.metric("Top Vendor",next(iter(k["top_v"]),"N/A"))
-c4.metric("Risk",f"{risk['score']:.0f} ({risk['band']})")
+# ------------- Dashboard -------------
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Records", k["records"])
+c2.metric("Spend", f"{k['total_spend']:,.2f} {k['dominant']}")
+c3.metric("Top Vendor", next(iter(k["top_v"]), "N/A"))
+c4.metric("Risk", f"{risk['score']:.0f} ({risk['band']})")
 
 st.subheader("Procurement Risk Gauge")
-st.image(gauge,use_container_width=True)
+st.image(gauge, use_container_width=True)
+
 st.subheader("Procurement Risk Breakdown")
-st.table(pd.DataFrame.from_dict(risk["breakdown"],orient="index",columns=["Score"]).reset_index().rename(columns={"index":"Metric"}))
+st.table(pd.DataFrame.from_dict(risk["breakdown"], orient="index", columns=["Score"])
+         .reset_index().rename(columns={"index": "Metric"}))
 
-ai=generate_ai(k)
+ai = generate_ai(k)
 st.subheader("AI Insights")
-st.markdown(ai.replace("\n","  \n"))
+st.markdown(ai.replace("\n", "  \n"))
 
-summary=ai[:1000]
-pdf=generate_pdf(ai,k,charts,company,summary,risk)
-st.download_button("📄 Download Full Executive Report",pdf,"SAP_Automatz_Executive_Report.pdf","application/pdf")
+summary = ai[:1000]
+pdf = generate_pdf(ai, k, charts, company, summary, risk)
+st.download_button("📄 Download Full Executive Report", pdf,
+                   "SAP_Automatz_Executive_Report.pdf", "application/pdf")
