@@ -1,6 +1,6 @@
 # ==========================================================
 # SAP AUTOMATZ – Executive Procurement Analytics
-# Version: v39 (Font Download Fix + Offline Ready)
+# Version: v40 (Unicode-safe final build)
 # ==========================================================
 
 import os, io, re, datetime, math
@@ -59,8 +59,13 @@ if not st.session_state.verified:
     st.stop()
 
 # ---------------- HELPERS ----------------
-def sanitize_text(t): 
-    return unidecode(str(t)) if t else ""
+def sanitize_text(text):
+    """Removes all non-encodable characters for PDF output."""
+    if not text:
+        return ""
+    text = unidecode(str(text))
+    text = text.encode("latin-1", "ignore").decode("latin-1")
+    return re.sub(r'[^\x00-\x7F]+', ' ', text)
 
 def parse_amount_and_currency(v, fallback="INR"):
     if pd.isna(v): return 0.0, fallback
@@ -165,82 +170,54 @@ def generate_ai(k):
             model=MODEL,
             messages=[
                 {"role": "system", "content": "You are a procurement analytics expert."},
-                {"role": "user", "content": f"Provide clear executive insights, key recommendations, and action items for dataset:\n{k}"}
+                {"role": "user", "content": f"Provide executive insights and key recommendations for this procurement dataset:\n{k}"}
             ],
             temperature=0.2, max_tokens=800
         )
         return sanitize_text(r.choices[0].message.content)
     except Exception as e:
-        return f"AI Error: {e}"
+        return sanitize_text(f"AI Error: {e}")
 
-# ---------------- PDF CLASS ----------------
+# ---------------- PDF ----------------
 class PDF(FPDF):
-    def header(self): pass
     def footer(self):
         self.set_y(-15)
         self.set_font("Helvetica", "I", 8)
-        self.set_text_color(120, 120, 120)
+        self.set_text_color(100, 100, 100)
         self.cell(0, 10, f"SAP Automatz Confidential | Page {self.page_no()} of {{nb}}", 0, 0, "C")
 
-# ---------------- PDF GENERATION ----------------
 def generate_pdf(ai_text, kpis, charts, company, summary_text, risk):
     pdf = PDF()
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Helvetica", "", 11)
 
-    # 1️⃣ Cover Page
+    # Cover Page
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 20)
-    pdf.cell(0, 15, "Executive Procurement Analysis Report", ln=True, align="C")
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 10, sanitize_text("Executive Procurement Analysis Report"), ln=True, align="C")
     pdf.ln(8)
     pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 8, f"Prepared for: {company}", ln=True, align="C")
+    pdf.cell(0, 8, sanitize_text(f"Prepared for: {company}"), ln=True, align="C")
     pdf.cell(0, 8, f"Generated on: {datetime.date.today().strftime('%d %B %Y')}", ln=True, align="C")
     pdf.ln(15)
-    pdf.multi_cell(0, 7, summary_text)
+    pdf.multi_cell(0, 7, sanitize_text(summary_text))
     pdf.image(LOGO_URL, x=160, y=260, w=30)
 
-    # 2️⃣ AI Insights
+    # Insights Page
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 10, "AI-Generated Executive Insights", ln=True)
+    pdf.cell(0, 10, "AI-Generated Insights", ln=True)
     pdf.set_font("Helvetica", "", 11)
-    pdf.multi_cell(0, 7, ai_text)
+    pdf.multi_cell(0, 7, sanitize_text(ai_text))
 
-    # 3️⃣ Risk Breakdown
+    # Risk Breakdown
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 13)
     pdf.cell(0, 10, "Procurement Risk Breakdown", ln=True)
     pdf.set_font("Helvetica", "", 11)
     for kx, vx in risk["breakdown"].items():
         pdf.cell(0, 8, f"{kx}: {vx:,.2f}", ln=True)
-
-    # 4️⃣ Charts
-    for ch in charts:
-        if os.path.exists(ch):
-            pdf.add_page()
-            title = os.path.basename(ch).replace("_", " ").replace(".png", "").title()
-            pdf.set_font("Helvetica", "B", 12)
-            pdf.cell(0, 10, title, ln=True)
-            pdf.image(ch, x=20, y=35, w=170)
-
-    # 5️⃣ Summary
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 10, "Summary of Findings", ln=True)
-    pdf.set_font("Helvetica", "", 11)
-    pdf.multi_cell(
-        0, 7,
-        f"• Total Spend: {kpis['total_spend']:,.2f} {kpis['dominant']}\n"
-        f"• Risk Score: {risk['score']:.0f} ({risk['band']})\n"
-        f"• Top Vendor: {next(iter(kpis['top_v']), 'N/A')}\n\n"
-        "Key Recommendations:\n"
-        f"{ai_text[:500]}\n\n"
-        "_____________________________\n"
-        "Prepared by: SAP Automatz AI Suite\n"
-        "Empowering Intelligent Procurement Transformation."
-    )
 
     return io.BytesIO(pdf.output(dest="S").encode("latin-1", "ignore"))
 
@@ -256,7 +233,10 @@ k = compute_kpis(df)
 risk = compute_procurement_risk(df, k)
 ai = generate_ai(k)
 
-# Generate PDF
 charts = []
-pdf = generate_pdf(ai, k, charts, company, ai[:1000], risk)
-st.download_button("📄 Download Full Executive Report", pdf, "SAP_Automatz_Executive_Report.pdf", "application/pdf")
+summary = ai[:1000]
+pdf = generate_pdf(ai, k, charts, company, summary, risk)
+
+st.download_button("📄 Download Full Executive Report",
+                   pdf, "SAP_Automatz_Executive_Report.pdf",
+                   "application/pdf")
