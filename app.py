@@ -1,6 +1,6 @@
 # ==========================================================
 # SAP AUTOMATZ – AI Procurement Analytics (ERP-Compatible)
-# Executive Dashboard Edition (v31.0 – Watermark Edition)
+# Executive Dashboard Edition (v31.1 – Unicode Safe Watermark)
 # ==========================================================
 
 import os, io, re, datetime, platform, requests, math
@@ -21,7 +21,7 @@ LOGO_URL = "https://raw.githubusercontent.com/sapautomatz-pun/SAP-MM-Analytics/1
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ------------------------- STREAMLIT -------------------------
+# ------------------------- STREAMLIT CONFIG -------------------------
 st.set_page_config(page_title="SAP Automatz – Executive Procurement Analytics", page_icon="📊", layout="wide")
 st.markdown("<style>.stApp header{visibility:hidden}</style>", unsafe_allow_html=True)
 
@@ -38,12 +38,13 @@ st.divider()
 
 # ------------------------- HELPERS -------------------------
 def sanitize_text(t):
-    return re.sub(r"[^\x09\x0A\x0D\x20-\x7E]", "", unidecode(str(t))) if t is not None else ""
+    return unidecode(str(t)) if t else ""
 
 def parse_amount_and_currency(v, fallback="INR"):
     if pd.isna(v): return 0.0, fallback
     if isinstance(v,(int,float,np.number)): return float(v), fallback
-    s=str(v); sym_map={"₹":"INR","Rs":"INR","$":"USD","USD":"USD","€":"EUR","EUR":"EUR"}
+    s=str(v)
+    sym_map={"₹":"INR","Rs":"INR","$":"USD","USD":"USD","€":"EUR","EUR":"EUR"}
     cur=fallback
     for sym,c in sym_map.items():
         if sym in s: cur=c; s=s.replace(sym,"")
@@ -94,15 +95,15 @@ class PDF(FPDF):
     def header(self): pass
     def footer(self):
         self.set_y(-15)
-        self.set_font("Helvetica","I",8)
+        self.set_font("DejaVu","I",8)
         self.set_text_color(130,130,130)
         self.cell(0,10,"© 2025 SAP Automatz – Executive Procurement Analytics",align="C")
 
     def watermark(self):
         self.set_text_color(200,200,200)
-        self.set_font("Helvetica","B",50)
+        self.set_font("DejaVu","B",36)
         self.rotate(45)
-        self.text(30,150,"SAP Automatz")
+        self.text(30,150,"SAP Automatz – Automate • Analyze • Accelerate")
         self.rotate(0)
 
     def rotate(self,angle,x=None,y=None):
@@ -112,20 +113,33 @@ class PDF(FPDF):
             self._out("Q")
 
 def add_tile(pdf,x,y,w,h,title,value,color):
-    pdf.set_fill_color(*color);pdf.rect(x,y,w,h,"F")
+    pdf.set_fill_color(*color)
+    pdf.rect(x,y,w,h,"F")
     pdf.set_text_color(255,255,255)
-    pdf.set_xy(x+3,y+3);pdf.set_font("Helvetica","B",11);pdf.cell(w-6,7,title,ln=True)
-    pdf.set_xy(x+3,y+11);pdf.set_font("Helvetica","",10);pdf.cell(w-6,6,str(value),ln=True)
+    pdf.set_xy(x+3,y+3)
+    pdf.set_font("DejaVu","B",11)
+    pdf.cell(w-6,7,title,ln=True)
+    pdf.set_xy(x+3,y+11)
+    pdf.set_font("DejaVu","",10)
+    pdf.cell(w-6,6,str(value),ln=True)
 
 def generate_pdf(ai,k,charts):
     pdf=PDF()
+    # add fonts for Unicode
+    font_dir = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    pdf.add_font("DejaVu","",font_dir,uni=True)
+    pdf.add_font("DejaVu","B",font_dir,uni=True)
+
     pdf.add_page()
     pdf.watermark()
 
-    pdf.set_fill_color(26,35,126);pdf.rect(0,0,210,25,"F")
-    pdf.set_text_color(255,255,255);pdf.set_font("Helvetica","B",16)
+    pdf.set_fill_color(26,35,126)
+    pdf.rect(0,0,210,25,"F")
+    pdf.set_text_color(255,255,255)
+    pdf.set_font("DejaVu","B",16)
     pdf.cell(0,15,"Executive Procurement Report",align="C",ln=True)
-    pdf.ln(12);pdf.set_text_color(0,0,0)
+    pdf.ln(12)
+    pdf.set_text_color(0,0,0)
 
     y=pdf.get_y()
     add_tile(pdf,10,y,60,22,"Total Records",k["records"],(13,71,161))
@@ -133,18 +147,25 @@ def generate_pdf(ai,k,charts):
     add_tile(pdf,140,y,60,22,"Dominant Currency",k["dominant"],(30,136,229))
     pdf.ln(35)
 
-    pdf.set_font("Helvetica","B",13);pdf.cell(0,10,"Executive Insights & Recommendations",ln=True)
-    pdf.set_font("Helvetica","",11)
+    pdf.set_font("DejaVu","B",13)
+    pdf.cell(0,10,"Executive Insights & Recommendations",ln=True)
+    pdf.set_font("DejaVu","",11)
     for line in ai.split("\n"):
-        if line.strip(): pdf.multi_cell(0,7,line.strip())
+        if line.strip():
+            pdf.multi_cell(0,7,line.strip())
 
     for ch in charts:
         if os.path.exists(ch):
-            pdf.add_page();pdf.watermark()
-            pdf.set_font("Helvetica","B",12)
+            pdf.add_page()
+            pdf.watermark()
+            pdf.set_font("DejaVu","B",12)
             pdf.cell(0,10,os.path.basename(ch).replace("_"," ").title(),ln=True)
             pdf.image(ch,x=20,w=170)
-    return io.BytesIO(pdf.output(dest="S").encode("latin-1"))
+
+    buffer = io.BytesIO()
+    pdf.output(buffer)
+    buffer.seek(0)
+    return buffer
 
 # ------------------------- STREAMLIT UI -------------------------
 st.title("📊 Executive Procurement Dashboard")
@@ -155,7 +176,6 @@ if not f: st.stop()
 df=pd.read_excel(f) if f.name.endswith(".xlsx") else pd.read_csv(f)
 k=compute_kpis(df)
 
-# Adjust metric font size
 st.markdown("<style>.stMetric label{font-size:12px!important}</style>",unsafe_allow_html=True)
 c1,c2,c3,c4=st.columns(4)
 c1.metric("Total Records",k["records"])
@@ -165,27 +185,27 @@ c4.metric("Top Material",next(iter(k["top_m"]), "N/A"))
 
 charts=[]
 
-# Currency pie
+# Currency Pie
 st.subheader("Currency Distribution")
 fig1,ax1=plt.subplots()
 ax1.pie(list(k["totals"].values()),labels=list(k["totals"].keys()),autopct="%1.1f%%")
 fig1.tight_layout();fig1.savefig("chart_currency.png");charts.append("chart_currency.png");st.pyplot(fig1)
 
-# Vendors
+# Vendors Bar
 st.subheader("Top 10 Vendors by Purchase Amount")
 fig2,ax2=plt.subplots()
 v=list(k["top_v"].keys());vals=list(k["top_v"].values())
-ax2.barh(v[::-1],vals[::-1],color="#2E7D32");ax2.set_xlabel("Amount");fig2.tight_layout()
-fig2.savefig("chart_vendors.png");charts.append("chart_vendors.png");st.pyplot(fig2)
+ax2.barh(v[::-1],vals[::-1],color="#2E7D32");ax2.set_xlabel("Amount")
+fig2.tight_layout();fig2.savefig("chart_vendors.png");charts.append("chart_vendors.png");st.pyplot(fig2)
 
-# Materials
+# Materials Bar (no overlap)
 st.subheader("Top 10 Materials by Quantity")
 fig3,ax3=plt.subplots()
 m=list(k["top_m"].keys());q=list(k["top_m"].values())
 ax3.bar(m,q,color="#1565C0");plt.xticks(rotation=45,ha='right')
 fig3.tight_layout();fig3.savefig("chart_materials.png");charts.append("chart_materials.png");st.pyplot(fig3)
 
-# Monthly trend
+# Monthly Trend
 if k["monthly"]:
     st.subheader("Monthly Purchase Trend")
     fig4,ax4=plt.subplots()
