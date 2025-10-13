@@ -1,6 +1,6 @@
 # ==========================================================
 # SAP AUTOMATZ – Executive Procurement Analytics
-# Version: v33.2 (Fixed Watermark Visibility + Risk Chart Label)
+# Version: v34.0 (Unicode PDF + Colored KPI Tiles + Final Layout)
 # ==========================================================
 
 import os, io, re, datetime, math
@@ -106,8 +106,7 @@ def compute_procurement_risk(df,k):
         cv=np.std(mvals)/(np.mean(mvals)+1e-9)
         m_vol=max(0.0,1-min(cv,2))*100
     else: m_vol=80.0
-    w_conc=w_div=w_curr=w_vol=0.25
-    score=v_conc*w_conc+v_div*w_div+c_expo*w_curr+m_vol*w_vol
+    score=v_conc*0.25+v_div*0.25+c_expo*0.25+m_vol*0.25
     score=float(max(0.0,min(100.0,score)))
     band="Low" if score>=67 else ("Medium" if score>=34 else "High")
     return {"score":score,"band":band,"breakdown":{"Vendor Concentration":v_conc,
@@ -135,91 +134,88 @@ Top vendors:
     except Exception as e:
         return f"AI Error: {e}"
 
-# ---------------- PDF CLASS ----------------
+# ---------------- PDF UTIL ----------------
 class PDF(FPDF):
-    def footer(self):
-        self.set_y(-15)
-        self.set_font("Helvetica","I",8)
-        self.set_text_color(130,130,130)
-        self.cell(0,10,"© 2025 SAP Automatz – Executive Procurement Analytics",align="C")
-    def add_watermark(self,text="SAP Automatz – Automate • Analyze • Accelerate"):
-        self.set_text_color(250,250,250)
-        self.set_font("Helvetica","B",28)
-        self.rotate(45)
-        self.text(25,150,text)
-        self.rotate(0)
-    def rotate(self,angle):
-        if angle!=0:
-            self._out(f"q {math.cos(angle*math.pi/180):.5f} {math.sin(angle*math.pi/180):.5f} "
-                      f"{-math.sin(angle*math.pi/180):.5f} {math.cos(angle*math.pi/180):.5f} 0 0 cm")
-        else:self._out("Q")
+    def rect_tile(self, x, y, w, h, color, title, value):
+        self.set_fill_color(*color)
+        self.rect(x, y, w, h, "F")
+        self.set_xy(x+3, y+4)
+        self.set_text_color(255, 255, 255)
+        self.set_font("DejaVu", "B", 12)
+        self.cell(w-6, 6, title, ln=True)
+        self.set_xy(x+3, y+12)
+        self.set_font("DejaVu", "", 11)
+        self.cell(w-6, 6, str(value))
 
-def add_tile(pdf,x,y,w,h,title,value,color):
-    pdf.set_fill_color(*color)
-    pdf.rect(x,y,w,h,"F")
-    pdf.set_text_color(255,255,255)
-    pdf.set_xy(x+3,y+4)
-    pdf.set_font("Helvetica","B",11)
-    pdf.cell(w-6,6,title,ln=True)
-    pdf.set_xy(x+3,y+11)
-    pdf.set_font("Helvetica","",10)
-    pdf.cell(w-6,6,str(value),ln=True)
+def generate_pdf(ai_text, kpis, charts, company, summary_text, risk):
+    pdf = PDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
 
-def safe_text(pdf,text):
-    for line in str(text).split("\n"):
-        if not line.strip(): continue
-        try: pdf.multi_cell(0,7,sanitize_text(line.strip()))
-        except: pdf.multi_cell(0,7,sanitize_text(line.strip())[:200])
+    # Register Unicode font (DejaVu)
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if not os.path.exists(font_path):
+        os.makedirs("fonts", exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans.ttf",
+            "fonts/DejaVuSans.ttf"
+        )
+        font_path = "fonts/DejaVuSans.ttf"
 
-def generate_pdf(ai,k,charts,company,summary,risk):
-    pdf=PDF()
+    pdf.add_font("DejaVu", "", font_path, uni=True)
+    pdf.add_font("DejaVu", "B", font_path, uni=True)
+    pdf.set_font("DejaVu", "", 11)
+
+    # COVER PAGE
     pdf.add_page()
-    pdf.set_font("Helvetica","B",20)
-    pdf.cell(0,10,"Executive Procurement Analysis Report",ln=True,align="C")
-    pdf.set_font("Helvetica","",12)
-    pdf.cell(0,10,f"Prepared for: {company}",ln=True,align="C")
-    pdf.cell(0,10,f"Generated on: {datetime.date.today().strftime('%d %B %Y')}",ln=True,align="C")
-    pdf.ln(10); pdf.set_font("Helvetica","",11); safe_text(pdf,summary)
-    pdf.add_watermark()
+    pdf.set_font("DejaVu", "B", 18)
+    pdf.cell(0, 10, "Executive Procurement Analysis Report", ln=True, align="C")
+    pdf.set_font("DejaVu", "", 12)
+    pdf.cell(0, 8, f"Prepared for: {company}", ln=True, align="C")
+    pdf.cell(0, 8, f"Generated on: {datetime.date.today().strftime('%d %B %Y')}", ln=True, align="C")
+    pdf.ln(10)
+    pdf.multi_cell(0, 7, summary_text)
 
+    # KPI PAGE
     pdf.add_page()
-    pdf.set_font("Helvetica","B",14)
-    pdf.cell(0,10,"Executive Dashboard",ln=True,align="C")
-    y=pdf.get_y()+5
-    add_tile(pdf,10,y,50,22,"Total Records",k["records"],(13,71,161))
-    add_tile(pdf,65,y,70,22,"Total Spend",f"{k['total_spend']:,.2f}",(21,101,192))
-    add_tile(pdf,140,y,60,22,"Dominant Currency",k["dominant"],(30,136,229))
-    pdf.ln(36)
-    color=(56,142,60) if risk["band"]=="Low" else ((242,153,74) if risk["band"]=="Medium" else (192,39,0))
-    add_tile(pdf,10,pdf.get_y(),80,22,"Procurement Risk Index",f"{risk['score']:.0f} ({risk['band']})",color)
-    pdf.add_watermark()
+    pdf.set_font("DejaVu", "B", 14)
+    pdf.cell(0, 10, "Executive Dashboard Overview", ln=True, align="C")
+    y = pdf.get_y() + 5
+    pdf.rect_tile(10, y, 60, 20, (33, 150, 243), "Total Spend", f"{kpis['total_spend']:,.2f}")
+    pdf.rect_tile(75, y, 60, 20, (76, 175, 80), "Top Vendor", next(iter(kpis["top_v"]), "N/A"))
+    pdf.rect_tile(140, y, 60, 20, (255, 167, 38), "Currency", kpis.get("dominant", "INR"))
+    pdf.rect_tile(10, y+28, 190, 20, (229, 57, 53), "Risk Index", f"{risk['score']:.0f} ({risk['band']})")
 
+    # AI INSIGHTS
     pdf.add_page()
-    pdf.set_font("Helvetica","B",13)
-    pdf.cell(0,10,"AI-Generated Insights",ln=True)
-    pdf.set_font("Helvetica","",11)
-    safe_text(pdf,ai)
-    pdf.add_watermark()
+    pdf.set_font("DejaVu", "B", 14)
+    pdf.cell(0, 10, "AI-Generated Executive Insights", ln=True)
+    pdf.set_font("DejaVu", "", 11)
+    for line in ai_text.split("\n"):
+        if line.strip():
+            pdf.multi_cell(0, 7, line.strip())
 
+    # RISK BREAKDOWN
     pdf.add_page()
-    pdf.set_font("Helvetica","B",13)
-    pdf.cell(0,10,"Procurement Risk Breakdown",ln=True)
-    pdf.set_font("Helvetica","",11)
-    for kx,vx in risk["breakdown"].items():
-        pdf.cell(0,8,f"{kx}: {vx:,.2f}",ln=True)
-    pdf.add_watermark()
+    pdf.set_font("DejaVu", "B", 13)
+    pdf.cell(0, 10, "Procurement Risk Breakdown", ln=True)
+    pdf.set_font("DejaVu", "", 11)
+    for kx, vx in risk["breakdown"].items():
+        pdf.multi_cell(0, 7, f"{kx}: {vx:,.2f}")
 
+    # CHARTS
     for ch in charts:
         if os.path.exists(ch):
             pdf.add_page()
-            pdf.set_font("Helvetica","B",12)
-            pdf.cell(0,10,os.path.basename(ch).replace(".png","").replace("_"," ").title(),ln=True)
-            pdf.image(ch,x=20,y=30,w=170)
-            pdf.add_watermark()
+            title = os.path.basename(ch).replace("_", " ").replace(".png", "").title()
+            pdf.set_font("DejaVu", "B", 12)
+            pdf.cell(0, 10, title, ln=True)
+            pdf.image(ch, x=20, y=30, w=170)
 
-    return io.BytesIO(pdf.output(dest="S").encode("latin-1","ignore"))
+    pdf_bytes = pdf.output(dest="S").encode("utf-8")
+    return io.BytesIO(pdf_bytes)
 
-# ---------------- RISK GAUGE ----------------
+# ---------------- CHARTS ----------------
 def plot_risk_gauge(score,path="gauge_risk.png"):
     fig,ax=plt.subplots(figsize=(6,3))
     ax.axis("off")
