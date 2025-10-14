@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v9
-# Adds company logo + tagline on every PDF page header + fixes Streamlit rerun error
+# SAP Automatz – Procurement Analytics v10
+# Fixes UnboundLocalError in compute_risk + adds logo & tagline on all PDF pages
 
 import os
 import io
@@ -18,7 +18,7 @@ from fpdf import FPDF
 
 # ---------- CONFIG ----------
 MODEL = "gpt-4o-mini"
-LOGO_PATH = "sapautomatz_logo.png"  # your uploaded logo file
+LOGO_PATH = "sapautomatz_logo.png"  # your uploaded logo
 TAGLINE = "Automate. Analyze. Accelerate."
 VALID_KEYS = {"SAPMM-00000000000000", "DEMO-ACCESS-12345"}
 
@@ -72,8 +72,8 @@ def prepare_dataframe(df: pd.DataFrame):
 
 def compute_kpis(df):
     df = prepare_dataframe(df)
-    totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict()
-    total_spend = sum(totals.values())
+    totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict() if "CURRENCY_DETECTED" in df.columns else {}
+    total_spend = sum(totals.values()) if totals else float(df["AMOUNT_NUM"].sum())
     dominant = max(totals, key=totals.get) if totals else "INR"
     top_v = df.groupby("VENDOR")["AMOUNT_NUM"].sum().nlargest(10).to_dict() if "VENDOR" in df.columns else {}
     top_m = df.groupby("MATERIAL")["AMOUNT_NUM"].sum().nlargest(10).to_dict() if "MATERIAL" in df.columns else {}
@@ -84,22 +84,34 @@ def compute_kpis(df):
         if not temp.empty:
             temp["MONTH"] = temp["PO_DATE"].dt.to_period("M").astype(str)
             monthly = temp.groupby("MONTH")["AMOUNT_NUM"].sum().to_dict()
-    return {"totals": totals, "total_spend": total_spend, "dominant": dominant, "top_v": top_v, "top_m": top_m, "monthly": monthly, "df": df}
+    return {"totals": totals, "total_spend": total_spend, "dominant": dominant,
+            "top_v": top_v, "top_m": top_m, "monthly": monthly, "df": df}
 
 def compute_risk(k):
-    df = k["df"]
-    total = k.get("total_spend", 0)
+    df = k.get("df", pd.DataFrame())
+    total = k.get("total_spend", 0.0) or 0.0
     if total == 0 or df.empty:
         return {"score": 0, "band": "Low", "breakdown": {}}
+
+    # safely set dominant currency
+    dom = k.get("dominant", "INR")
+    totals = k.get("totals", {})
     v = df.groupby("VENDOR")["AMOUNT_NUM"].sum() if "VENDOR" in df.columns else pd.Series(dtype=float)
-    nv, top_share = len(v), float(v.max())/total if not v.empty else 1.0
-    v_conc, v_div = (1 - top_share)*100, min(100, (nv/50)*100)
-    dom, c_expo = k["dominant"], (k["totals"].get(dom, 0)/total)*100
+    nv = len(v)
+    top_share = float(v.max()) / total if not v.empty else 1.0
+    v_conc = (1 - top_share) * 100
+    v_div = min(100.0, (nv / 50.0) * 100.0) if nv > 0 else 0.0
+    c_expo = (totals.get(dom, 0.0) / total) * 100.0 if total else 100.0
     mvals = list(k.get("monthly", {}).values())
-    m_vol = 100*(1 - np.std(mvals)/(np.mean(mvals)+1e-9)) if len(mvals) > 2 else 80
-    score = np.clip((v_conc+v_div+c_expo+m_vol)/4, 0, 100)
-    band = "Low" if score >= 67 else "Medium" if score >= 34 else "High"
-    return {"score": score, "band": band, "breakdown": {"Vendor Concentration": v_conc, "Vendor Diversity": v_div, "Currency Exposure": c_expo, "Monthly Volatility": m_vol}}
+    m_vol = 100.0 * (1 - np.std(mvals) / (np.mean(mvals) + 1e-9)) if len(mvals) > 2 and np.mean(mvals) != 0 else 80.0
+    score = float(np.clip((v_conc + v_div + c_expo + m_vol) / 4.0, 0.0, 100.0))
+    band = "Low" if score >= 67 else ("Medium" if score >= 34 else "High")
+    return {"score": score, "band": band, "breakdown": {
+        "Vendor Concentration": v_conc,
+        "Vendor Diversity": v_div,
+        "Currency Exposure": c_expo,
+        "Monthly Volatility": m_vol
+    }}
 
 def compute_efficiency(df):
     if "VENDOR" not in df.columns or df.empty:
@@ -110,7 +122,8 @@ def compute_efficiency(df):
 def compute_material_performance(df):
     if "MATERIAL" not in df.columns or df.empty:
         return {}
-    return df.groupby("MATERIAL")["AMOUNT_NUM"].sum().sort_values(ascending=False).head(10).to_dict()
+    mat_perf = df.groupby("MATERIAL")["AMOUNT_NUM"].sum().sort_values(ascending=False).head(10)
+    return mat_perf.to_dict()
 
 # ---------- PDF CLASS ----------
 class PDF(FPDF):
@@ -135,7 +148,6 @@ class PDF(FPDF):
 # ---------- CHARTS ----------
 def generate_dashboard_charts(k, risk):
     chart_files = []
-    # Monthly trend
     if k.get("monthly"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             plt.figure(figsize=(6, 3))
@@ -146,7 +158,6 @@ def generate_dashboard_charts(k, risk):
             plt.savefig(tmp.name, bbox_inches="tight")
             chart_files.append(tmp.name)
         plt.close()
-    # Top 5 vendors
     if k.get("top_v"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             top5 = dict(list(k["top_v"].items())[:5])
@@ -158,7 +169,6 @@ def generate_dashboard_charts(k, risk):
             plt.savefig(tmp.name, bbox_inches="tight")
             chart_files.append(tmp.name)
         plt.close()
-    # Risk breakdown
     if risk.get("breakdown"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             plt.figure(figsize=(6, 3))
@@ -218,7 +228,7 @@ with col2:
         if key.strip() in VALID_KEYS:
             st.session_state["verified"] = True
             st.success("Access verified.")
-            st.rerun()  # ✅ fixed Streamlit rerun
+            st.rerun()
         else:
             st.error("Invalid key.")
 
