@@ -324,5 +324,112 @@ def generate_pdf(ai_text, insights, k, risk, charts, company):
             pdf.set_font("Helvetica", "", 12)
             pdf.ln(4)
 
-    # Risk Summary
-    pdf.set_text_color(25, 50, 125); pdf.set_font("Helvetica",
+        # Risk Summary
+    pdf.set_text_color(25, 50, 125)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, "Risk Summary", ln=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "", 12)
+    pdf.cell(0, 7, f"Risk Score: {risk['score']:.1f} ({risk['band']})", ln=True)
+    for k_, v_ in risk.get("breakdown", {}).items():
+        pdf.cell(0, 7, f"- {k_}: {v_:.1f}", ln=True)
+    pdf.ln(8)
+
+    # AI tag at the end
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 6, AI_TAGLINE, ln=True)
+
+    # Final output
+    out = io.BytesIO(pdf.output(dest="S").encode("latin-1", "ignore"))
+    out.seek(0)
+    return out
+
+
+# ---------- APP FLOW ----------
+st.subheader("🔐 Verify Access Key")
+col1, col2 = st.columns([3, 1])
+with col1:
+    key = st.text_input("Enter access key", type="password")
+with col2:
+    if st.button("Verify"):
+        if key and key.strip() in VALID_KEYS:
+            st.session_state["verified"] = True
+            st.success("Access verified.")
+            st.rerun()
+        else:
+            st.error("Invalid key.")
+
+if not st.session_state["verified"]:
+    st.stop()
+
+file = st.file_uploader("Upload Procurement File (CSV/XLSX)", type=["csv", "xlsx"])
+if not file:
+    st.info("Please upload your procurement extract.")
+    st.stop()
+
+company = st.text_input("Enter Company Name", "ABC Manufacturing Pvt Ltd")
+
+try:
+    # Read file
+    df = pd.read_excel(file) if file.name.lower().endswith(".xlsx") else pd.read_csv(file)
+    k = compute_kpis(df)
+    risk = compute_risk(k)
+    ai_text = generate_ai_text(k)
+
+    # Compute insights
+    insights = [
+        spend_trend_insight(k.get("monthly", {})),
+        vendor_dependency_insight(k.get("top_v", {}), k.get("total_spend", 0.0)),
+        currency_exposure_insight(k.get("totals", {})),
+        efficiency_insight(compute_efficiency_summary(k["df"])),
+        material_mix_insight(k.get("top_m", {}), k.get("total_spend", 0.0)),
+        current_month_snapshot(k.get("monthly", {}), k.get("top_v", {}))
+    ]
+
+    # On-screen display
+    st.markdown("## Procurement Insights Summary")
+    for ins in insights:
+        st.write("- " + ins)
+    st.caption(AI_TAGLINE)
+
+    st.markdown("## Executive Summary")
+    st.write(ai_text)
+
+    st.markdown("### Key Performance Metrics")
+    cols = st.columns(5)
+    metrics_vals = [
+        f"{k['total_spend']:,.2f} {k['dominant']}",
+        k["records"],
+        len(k["top_v"]),
+        len(k["top_m"]),
+        f"{risk['score']:.1f} ({risk['band']})"
+    ]
+    labels = ["Total Spend", "Records", "Vendors", "Materials", "Risk Score"]
+    for c, label, val in zip(cols, labels, metrics_vals):
+        c.metric(label, str(val))
+
+    st.markdown("### Dashboard Charts")
+    charts = generate_dashboard_charts(k, risk)
+    if charts:
+        st.image(charts, caption=["Spend Trend", "Top Vendors", "Risk Breakdown"], use_container_width=True)
+    else:
+        st.info("Not enough data to generate charts.")
+    st.caption(AI_TAGLINE)
+
+    # PDF generation
+    if st.button("📄 Generate PDF Report"):
+        pdf_buf = generate_pdf(ai_text, insights, k, risk, charts, company)
+        safe_name = company.strip().replace(" ", "_") or "Company"
+        st.download_button(
+            "Download Report",
+            pdf_buf,
+            file_name=f"{safe_name}_Procurement_Report.pdf",
+            mime="application/pdf",
+        )
+
+except Exception:
+    st.error("Error generating report:")
+    st.text(traceback.format_exc())
+
+
