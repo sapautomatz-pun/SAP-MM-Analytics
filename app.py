@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics (SLA per-row/vendor/material support)
-# v26.1 — fixes: dynamic PDF column autosizing to prevent overflow/wrap/garbage in tables
+# SAP Automatz – Procurement Analytics (v26.2)
+# Fix: improved PDF table rendering using FPDF.get_string_width to avoid wrapping/garbage
 
 import os
 import io
@@ -536,7 +536,7 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
         plt.close()
     return charts
 
-# ---------- PDF helpers (updated to autoscale columns) ----------
+# ---------- PDF helpers (accurate width/height calculation) ----------
 def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
     try:
         bottom_limit = pdf_obj.h - pdf_obj.b_margin
@@ -593,38 +593,56 @@ def _normalize_col_widths(pdf: PDF, col_w, ncols):
 def _pdf_table_row(pdf, row_cells, col_widths=None, font_size=9, alignments=None):
     """
     Render a row with dynamic wrapping and autoscaled widths.
-    - col_widths can be None or a proposal; this function will normalize to usable width.
+    Uses FPDF.get_string_width for accurate width measurement.
     """
     ncols = len(row_cells)
     col_widths_norm = _normalize_col_widths(pdf, col_widths, ncols)
     if alignments is None:
         alignments = ['L'] * ncols
-    sanitized = [sanitize_for_pdf(str(x)) for x in row_cells]
-    # compute estimated lines for each cell given width
+    # sanitize and convert types
+    sanitized = [sanitize_for_pdf("" if x is None else str(x)) for x in row_cells]
+    # ensure font set before get_string_width calls
+    pdf.set_font("Helvetica", size=font_size)
+    # approximate internal padding (mm)
+    cell_h_padding = 1.5  # line height internal padding
+    # compute estimated lines for each cell given width using get_string_width
     est_lines = []
     for text, w in zip(sanitized, col_widths_norm):
-        # approx characters per line depends on width - heuristic (adjust if needed)
-        chars_per_line = max(12, int(w * 3.0))
-        lines = int(np.ceil(len(text) / max(1, chars_per_line)))
-        # also account for explicit newlines
-        lines = max(lines, text.count("\n") + 1)
-        est_lines.append(lines)
+        # handle explicit newlines: treat each line separately
+        parts = text.split("\n")
+        max_lines = 0
+        inner_w = max(1.0, w - 2.0)  # leave small padding
+        for part in parts:
+            # if empty string
+            if part.strip() == "":
+                needed = 1
+            else:
+                text_width = pdf.get_string_width(part)
+                # get_string_width returns width in user units (mm). number of lines = ceil(text_width / inner_w)
+                needed = int(np.ceil(text_width / inner_w))
+                needed = max(1, needed)
+            max_lines = max(max_lines, needed)
+        est_lines.append(max_lines)
     lines_needed = max(est_lines) if est_lines else 1
+    # line height (mm)
     line_h = max(4.0, font_size * 0.35 + 2)
-    cell_h = lines_needed * line_h
+    cell_h = lines_needed * line_h + 2  # add small vertical padding
     ensure_pdf_space(pdf, cell_h + 2)
     x_start = pdf.get_x()
     y_start = pdf.get_y()
-    # draw each cell as multi_cell then move x cursor forward
+    # draw each cell: set font and use multi_cell with given width & line_h
     for i, (text, w) in enumerate(zip(sanitized, col_widths_norm)):
         pdf.set_font("Helvetica", size=font_size)
         align = alignments[i] if i < len(alignments) else 'L'
         x = pdf.get_x()
         y = pdf.get_y()
-        # multi_cell will move to next line; by restoring x position we maintain same row
+        # use multi_cell; but we need to ensure the cell height is lines_needed*line_h
+        # write text with multi_cell; it will wrap as necessary
         pdf.multi_cell(w, line_h, text, border=1, align=align)
+        # move to right of cell for next column
         pdf.set_xy(x + w, y)
-    pdf.ln(cell_h)
+    # move cursor down to the next row baseline (the tallest cell height)
+    pdf.ln(cell_h - (pdf.get_string_width("") * 0))  # keep ln(cell_h)
 
 def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf = PDF(); pdf.alias_nb_pages(); pdf.add_page()
@@ -774,7 +792,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     out.seek(0)
     return out
 
-# ---------- APP FLOW ----------
+# ---------- APP FLOW (unchanged) ----------
 st.subheader("🔐 Verify Access Key")
 col1, col2 = st.columns([3, 1])
 with col1:
