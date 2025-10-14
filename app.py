@@ -206,6 +206,27 @@ def current_month_snapshot(monthly, top_v):
     top_vendor = list(top_v.keys())[0] if top_v else "N/A"
     trend = "up" if pct > 0 else "down" if pct < 0 else "flat"
     return f"Current month ({last}): {last_val:,.0f}; top vendor: {top_vendor}; trend: {trend} {abs(pct):.1f}% vs prior month."
+def generate_ai_text(k):
+    total = k.get("total_spend", 0.0)
+    currency = k.get("dominant", "INR")
+    top_v = list(k.get("top_v", {}).keys())[:3]
+    if not top_v:
+        top_v_text = "no major vendors identified"
+    else:
+        top_v_text = ", ".join(top_v)
+    totals = k.get("totals", {})
+    if len(totals) > 1:
+        other_currencies = [c for c in totals.keys() if c != currency]
+        exposure = sum(v for c, v in totals.items() if c != currency)
+        exposure_pct = (exposure / (total + 1e-9)) * 100.0
+        exposure_text = f" with approximately {exposure_pct:.1f}% exposure in {', '.join(other_currencies[:3])}"
+    else:
+        exposure_text = ""
+    return (
+        f"Total procurement spend was {total:,.2f} {currency}{exposure_text}. "
+        f"Top vendors by spend: {top_v_text}. "
+        f"Overall procurement performance indicates opportunities in vendor optimization and currency risk management."
+    )
 
 # ---------- PDF class ----------
 class PDF(FPDF):
@@ -474,3 +495,4 @@ try:
 except Exception:
     st.error("Error generating report:")
     st.text(traceback.format_exc())
+
