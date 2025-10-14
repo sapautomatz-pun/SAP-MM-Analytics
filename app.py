@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v19
-# Adds PO_QTY, GR_QTY, GR_DATE, GR_STATUS, INVOICE_DATE and vendor-performance insights + chart
+# SAP Automatz – Procurement Analytics v20
+# Fix: restore missing insight functions and tighten up insight assembly
 
 import os
 import io
@@ -33,8 +33,11 @@ with col_logo:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=110)
 with col_title:
-    st.markdown(f"<h2 style='color:#1a237e;margin-bottom:0'>SAP Automatz – Procurement Analytics</h2>"
-                f"<p style='margin-top:0;color:#555;'>{TAGLINE}</p>", unsafe_allow_html=True)
+    st.markdown(
+        f"<h2 style='color:#1a237e;margin-bottom:0'>SAP Automatz – Procurement Analytics</h2>"
+        f"<p style='margin-top:0;color:#555;'>{TAGLINE}</p>",
+        unsafe_allow_html=True,
+    )
 st.divider()
 st.session_state.setdefault("verified", False)
 
@@ -63,7 +66,7 @@ def to_int_safe(x):
         if pd.isna(x):
             return 0
         s = str(x).replace(",", "")
-        return int(float(re.sub(r"[^\d.\-]", "", s))) if s not in ("", "", ".", "-", "-.") else 0
+        return int(float(re.sub(r"[^\d.\-]", "", s))) if s not in ("", ".", "-", "-.") else 0
     except Exception:
         return 0
 
@@ -107,7 +110,6 @@ def detect_column(df_cols, candidates):
 def prepare_dataframe(df: pd.DataFrame):
     df = df.copy()
     # normalize column names
-    orig_cols = list(df.columns)
     df.columns = [c.strip() for c in df.columns]
 
     # detect key columns (allow flexible names)
@@ -138,10 +140,10 @@ def prepare_dataframe(df: pd.DataFrame):
 
     # ensure columns exist
     if "AMOUNT" not in df.columns:
-        # try to find any column with numeric-looking values and call it AMOUNT (not safe but fallback)
         df["AMOUNT"] = 0.0
     if "CURRENCY" not in df.columns:
         df["CURRENCY"] = "INR"
+
     # numeric amount + detected currency
     amounts = []
     currencies = []
@@ -237,85 +239,123 @@ def compute_efficiency_summary(df: pd.DataFrame):
 
 # ---------- VENDOR PERFORMANCE ----------
 def compute_vendor_performance(df: pd.DataFrame):
-    # returns DataFrame indexed by vendor with performance metrics
     if "VENDOR" not in df.columns or df.empty:
         return pd.DataFrame()
     g = df.groupby("VENDOR").agg(
         total_po_qty=pd.NamedAgg(column="PO_QTY_NUM", aggfunc="sum"),
         total_gr_qty=pd.NamedAgg(column="GR_QTY_NUM", aggfunc="sum"),
         total_spend=pd.NamedAgg(column="AMOUNT_NUM", aggfunc="sum"),
-        avg_invoice_lag_days=pd.NamedAgg(column="INVOICE_DATE", aggfunc=lambda s: np.nan),  # placeholder
     )
-    # compute fulfillment rate
     g["fulfillment_rate"] = np.where(g["total_po_qty"] > 0, g["total_gr_qty"] / g["total_po_qty"], np.nan)
-    # on-time rate: count gr_date within window of po_date
-    # We'll compute per-row then aggregate
     df_rows = df[["VENDOR", "PO_DATE", "GR_DATE", "INVOICE_DATE", "GR_STATUS_NORM", "PO_QTY_NUM", "GR_QTY_NUM", "AMOUNT_NUM"]].copy()
     df_rows["on_time"] = False
-    # define on_time condition if GR_DATE exists and PO_DATE exists
     mask = (~df_rows["GR_DATE"].isna()) & (~df_rows["PO_DATE"].isna())
     df_rows.loc[mask, "on_time"] = (df_rows.loc[mask, "GR_DATE"] - df_rows.loc[mask, "PO_DATE"]).dt.days <= ON_TIME_WINDOW_DAYS
     ontime = df_rows.groupby("VENDOR")["on_time"].mean().fillna(0) * 100.0
     g["on_time_pct"] = ontime
-    # invoice lag: invoice_date - gr_date in days
     df_rows["invoice_lag"] = np.nan
     mask2 = (~df_rows["INVOICE_DATE"].isna()) & (~df_rows["GR_DATE"].isna())
     df_rows.loc[mask2, "invoice_lag"] = (df_rows.loc[mask2, "INVOICE_DATE"] - df_rows.loc[mask2, "GR_DATE"]).dt.days
     invlag = df_rows.groupby("VENDOR")["invoice_lag"].mean().fillna(np.nan)
     g["avg_invoice_lag"] = invlag
-    # GR status counts
     status_counts = df_rows.groupby(["VENDOR", "GR_STATUS_NORM"]).size().unstack(fill_value=0)
-    # attach status columns
     for col in status_counts.columns:
         g[f"status_{col}"] = status_counts[col]
-    # fill missing columns for consistent schema
     for col in ["status_complete", "status_partial", "status_nan"]:
         if col not in g.columns:
             g[col] = 0
-    # sort
     g = g.sort_values("total_spend", ascending=False)
-    return g.reset_index()
+    g = g.reset_index().rename(columns={"index": "VENDOR"})
+    return g
 
-# ---------- INSIGHTS (extended) ----------
+# ---------- INSIGHTS (complete) ----------
+def currency_exposure_insight_extended(totals: dict):
+    if not totals:
+        return "Currency Exposure: No currency data available."
+    total = sum(totals.values())
+    items = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    parts = [f"{cur}: {amt:,.0f} ({amt/total*100:.1f}%)" for cur, amt in items[:4]]
+    exposure_others = 100.0 - (items[0][1] / (total + 1e-9) * 100.0)
+    risk_note = "High exposure to multiple currencies increases FX risk; consider hedging or invoicing strategies." if exposure_others > 20 else "Currency exposure appears concentrated; monitor FX rates."
+    return "Currency Exposure — Multi-currency spend distribution with risk assessment: " + "; ".join(parts) + ". " + risk_note
+
+def monthly_quarterly_trend_insight_extended(monthly: dict):
+    if not monthly:
+        return "Monthly/Quarterly Spend Trends: Not enough time-series data."
+    months = sorted(monthly.keys())
+    last_6 = months[-6:] if len(months) >= 6 else months
+    vals = [monthly[m] for m in last_6]
+    slope = np.polyfit(np.arange(len(vals)), vals, 1)[0] if len(vals) >= 2 else 0.0
+    trend = "increasing" if slope > 0 else "decreasing" if slope < 0 else "flat"
+    seasonal_note = "Seasonal fluctuations observed; spending peaks align with specific months or quarters." if len(monthly) >= 12 else ""
+    return f"Monthly/Quarterly Spend Trends: Recent trend is {trend}. {seasonal_note}"
+
+def material_spend_insight_extended(mat_perf: dict, total: float):
+    if not mat_perf:
+        return "Material Spend: No material category data available."
+    top = list(mat_perf.items())[:5]
+    parts = [f"{m} ({v/total*100:.1f}%)" for m, v in top[:3]]
+    dominance_note = "Top categories dominate spend; consider category sourcing strategies." if sum(v for _, v in top[:3]) / (total + 1e-9) > 0.5 else "Material spend is relatively diversified."
+    return f"Material Spend: Top categories include {', '.join(parts)}. {dominance_note}"
+
+def supplier_relationship_insight_extended(top_v: dict, total: float):
+    if not top_v:
+        return "Supplier Relationship Management: No vendor data available."
+    top3 = list(top_v.items())[:3]
+    pct = sum(v for _, v in top3) / (total + 1e-9) * 100.0
+    return (f"Supplier Relationship Management: Top 3 vendors contribute {pct:.1f}% of total spend. "
+            "High concentration indicates negotiation leverage but also supplier dependency risk. "
+            "Recommend strategic supplier segmentation, performance SLAs, and contingency sourcing.")
+
+def efficiency_insight_summary(eff_summary: dict):
+    if not eff_summary:
+        return "Efficiency: Insufficient data."
+    sorted_v = sorted(eff_summary.items(), key=lambda x: x[1]["avg_cost"])
+    best, worst = sorted_v[0], sorted_v[-1]
+    units = worst[1]["units_est"]
+    gap = worst[1]["avg_cost"] - best[1]["avg_cost"]
+    est_savings = units * gap if units > 0 and gap > 0 else 0.0
+    return (f"Efficiency: Most Efficient: {best[0]} at {best[1]['avg_cost']:.2f} cost/unit. "
+            f"Least Efficient: {worst[0]} at {worst[1]['avg_cost']:.2f} cost/unit; "
+            f"estimated annual savings if optimized: {est_savings:,.0f} (vendor currency).")
+
+def current_month_snapshot(monthly, top_v):
+    if not monthly:
+        return "Current Month Snapshot: No monthly data available."
+    months = sorted(monthly.keys())
+    last = months[-1]
+    last_val = monthly[last]
+    if len(months) >= 2:
+        prev_val = monthly[months[-2]]
+        pct_change = ((last_val - prev_val) / (prev_val + 1e-9)) * 100
+        trend = "increased" if pct_change > 0 else "decreased" if pct_change < 0 else "remained stable"
+        top_vendor = list(top_v.keys())[0] if top_v else "N/A"
+        return (f"Current Month Snapshot: Spend in {last} was {last_val:,.0f}, "
+                f"which {trend} by {abs(pct_change):.1f}% from the prior month. Top vendor for the period was {top_vendor}.")
+    else:
+        return f"Current Month Snapshot: Spend in {last} was {last_val:,.0f} (insufficient prior data for comparison)."
+
 def vendor_performance_insight_extended(vperf_df: pd.DataFrame):
     if vperf_df.empty:
         return "Vendor Performance: No vendor quantity/GR/invoice data available."
-    # pick best by fulfillment_rate (highest, not NaN) and best on_time_pct
     valid = vperf_df.dropna(subset=["fulfillment_rate"])
     if valid.empty:
         return "Vendor Performance: Not enough PO/GR quantity data to compute fulfillment rates."
     best = valid.sort_values("fulfillment_rate", ascending=False).iloc[0]
     worst = valid.sort_values("fulfillment_rate", ascending=True).iloc[0]
-    # find best on-time
     ontime_best = vperf_df.sort_values("on_time_pct", ascending=False).iloc[0]
+    avg_inv_lag = vperf_df["avg_invoice_lag"].dropna()
+    avg_inv_lag_val = avg_inv_lag.mean() if not avg_inv_lag.empty else np.nan
     lines = [
         f"Vendor Performance: Best fulfillment: {best['VENDOR']} ({best['fulfillment_rate']*100:.1f}% filled).",
         f"Worst fulfillment: {worst['VENDOR']} ({worst['fulfillment_rate']*100:.1f}% filled).",
         f"Best on-time deliveries: {ontime_best['VENDOR']} ({ontime_best['on_time_pct']:.1f}% on-time).",
-        f"Average invoice lag across vendors (days): {vperf_df['avg_invoice_lag'].dropna().mean():.1f} (NaN if no invoice dates).",
+        f"Average invoice lag across vendors (days): {avg_inv_lag_val:.1f} (NaN if no invoice dates).",
         "Recommend engaging low-fulfillment vendors for corrective action and improving invoice processing for lagging suppliers."
     ]
     return " ".join(lines)
 
-# ---------- EXECUTIVE SUMMARY ----------
-def generate_ai_text(k: dict):
-    total = k.get("total_spend", 0.0)
-    currency = k.get("dominant", "INR")
-    top_v = list(k.get("top_v", {}).keys())[:3]
-    top_v_text = ", ".join(top_v) if top_v else "no major vendors identified"
-    totals = k.get("totals", {})
-    if len(totals) > 1:
-        other = [c for c in totals.keys() if c != currency]
-        exposure = sum(v for c, v in totals.items() if c != currency)
-        exposure_pct = (exposure / (total + 1e-9)) * 100.0
-        exposure_text = f" with {exposure_pct:.1f}% exposure in {', '.join(other[:3])}"
-    else:
-        exposure_text = ""
-    return (f"Total procurement spend was {total:,.2f} {currency}{exposure_text}. "
-            f"Top vendors by spend: {top_v_text}. "
-            f"Overall procurement performance indicates opportunities in vendor optimization, delivery fulfillment, and invoice processing.")
-
-# ---------- CHARTS (adds vendor fulfillment chart) ----------
+# ---------- CHARTS ----------
 def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame):
     charts = []
     # Monthly trend
@@ -354,16 +394,14 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Vendor fulfillment chart (top 8 by spend or by qty)
+    # Vendor fulfillment chart
     try:
         if not vendor_perf_df.empty:
-            dfv = vendor_perf_df.copy()
-            # prefer vendors with PO qty >0
-            dfv = dfv.sort_values("total_spend", ascending=False).head(8)
+            dfv = vendor_perf_df.copy().head(8)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                plt.figure(figsize=(8, 3.6))
                 labels = dfv["VENDOR"].tolist()
                 vals = (dfv["fulfillment_rate"].fillna(0).astype(float) * 100).tolist()
+                plt.figure(figsize=(8, 3.6))
                 plt.bar(range(len(labels)), vals)
                 plt.title("Vendor Fulfillment Rate (%)")
                 plt.xticks(range(len(labels)), labels, rotation=45, ha="right")
@@ -386,7 +424,7 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
         plt.close()
     return charts
 
-# ---------- PDF utilities ----------
+# ---------- PDF helpers ----------
 def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
     try:
         bottom_limit = pdf_obj.h - pdf_obj.b_margin
@@ -395,7 +433,6 @@ def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
     if pdf_obj.get_y() + needed_height_mm > bottom_limit:
         pdf_obj.add_page()
 
-# ---------- PDF Class ----------
 class PDF(FPDF):
     def header(self):
         if os.path.exists(LOGO_PATH):
@@ -417,7 +454,6 @@ class PDF(FPDF):
         self.set_text_color(100, 100, 100)
         self.cell(0, 10, f"SAP Automatz | Page {self.page_no()}", 0, 0, "C")
 
-# ---------- PDF Generator ----------
 def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf = PDF(); pdf.alias_nb_pages(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 20); pdf.set_text_color(*BRAND_BLUE)
@@ -429,7 +465,6 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf.ln(6); pdf.set_font("Helvetica", "I", 9); pdf.cell(0, 6, sanitize_for_pdf(AI_TAGLINE), ln=True)
     pdf.ln(8)
 
-    # Insights
     ensure_pdf_space(pdf, 40 + len(insights) * 7)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Procurement Insights (Expanded)"), ln=True)
@@ -439,15 +474,11 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         pdf.multi_cell(0, 7, sanitize_for_pdf(ins))
     pdf.ln(6)
 
-    # Executive summary
     ensure_pdf_space(pdf, 40)
-    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, sanitize_for_pdf("Executive Summary"), ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-    pdf.multi_cell(0, 7, sanitize_for_pdf(ai_text))
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Executive Summary"), ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12); pdf.multi_cell(0, 7, sanitize_for_pdf(ai_text))
     pdf.ln(6)
 
-    # Key metrics
     metrics = [
         f"Total Spend: {k['total_spend']:,.2f} {k['dominant']}",
         f"Records: {k['records']}",
@@ -463,12 +494,10 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         pdf.cell(0, 7, "- " + sanitize_for_pdf(m), ln=True)
     pdf.ln(6)
 
-    # Vendor Performance Summary
     ensure_pdf_space(pdf, 40)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Vendor Performance Summary"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
     if not vendor_perf_df.empty:
-        # Mention top and bottom vendor by fulfillment
         valid = vendor_perf_df.dropna(subset=["fulfillment_rate"])
         if not valid.empty:
             top = valid.sort_values("fulfillment_rate", ascending=False).iloc[0]
@@ -479,10 +508,9 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
             pdf.multi_cell(0, 7, sanitize_for_pdf("Not enough quantity data to compute vendor fulfillment rates."))
     else:
         pdf.multi_cell(0, 7, sanitize_for_pdf("Vendor performance metrics not available."))
-
     pdf.ln(6)
 
-    # Dashboard Charts on new page
+    # Charts start on new page
     if charts:
         pdf.add_page()
         pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Dashboard Charts"), ln=True)
@@ -503,7 +531,6 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
             except Exception:
                 continue
 
-    # Risk Summary
     ensure_pdf_space(pdf, 40)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Risk Summary"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
@@ -513,7 +540,6 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         pdf.cell(0, 7, "- " + sanitize_for_pdf(f"{k_}: {v_:.1f}"), ln=True)
     pdf.ln(8)
 
-    # AI tag at the end
     ensure_pdf_space(pdf, 10)
     pdf.set_font("Helvetica", "I", 9); pdf.set_text_color(100, 100, 100)
     pdf.cell(0, 6, sanitize_for_pdf(AI_TAGLINE), ln=True)
@@ -550,35 +576,19 @@ try:
     risk = compute_risk(k)
     ai_text = generate_ai_text(k)
 
-    # Vendor performance DF
+    # vendor perf DF
     vendor_perf_df = compute_vendor_performance(k["df"])
 
-    # Build insights
+    # Build insights using defined functions
     insights = []
-    insights.append(currency_exposure_insight := (
-        "Currency Exposure — Multi-currency spend distribution with risk assessment: " +
-        "; ".join([f"{c}: {a:,.0f} ({a/sum(k['totals'].values())*100:.1f}%)" for c,a in k['totals'].items()]) +
-        (". High exposure to multiple currencies increases FX risk; consider hedging or invoicing strategies." if len(k['totals'])>1 else "")
-    ) if k.get("totals") else "Currency Exposure: No currency data available.")
-    insights.append(monthly_quarterly_trend_insight_extended := (
-        "Monthly/Quarterly Spend Trends: " + ("Not enough time-series data." if not k.get("monthly") else
-        (f"Recent trend is {'increasing' if (np.polyfit(np.arange(len(list(k['monthly'].values()))), list(k['monthly'].values()),1)[0] if len(k['monthly'])>=2 else 0)>0 else 'flat or decreasing'}."))
-    ))
+    insights.append(currency_exposure_insight_extended(k.get("totals", {})))
+    insights.append(monthly_quarterly_trend_insight_extended(k.get("monthly", {})))
     insights.append(material_spend_insight_extended(k.get("top_m", {}), k.get("total_spend", 0.0)))
-    insights.append(supplier_relationship_insight := (
-        f"Supplier Relationship Management: Top 3 vendors contribute {sum(list(k.get('top_v', {}).values())[:3]) / (k.get('total_spend',1e-9) ) * 100:.1f}% of total spend."
-    ) if k.get("top_v") else "Supplier Relationship Management: No vendor data.")
-    # vendor performance narrative
+    insights.append(supplier_relationship_insight_extended(k.get("top_v", {}), k.get("total_spend", 0.0)))
     insights.append(vendor_performance_insight_extended(vendor_perf_df))
     eff_summary = compute_efficiency_summary(k["df"])
-    insights.append(efficiency_insight_summary := (
-        efficiency_insight_summary(eff_summary)
-    ))
-    insights.append(current_month_snapshot := (
-        (lambda monthly, top_v: ("Current Month Snapshot: No monthly data available." if not monthly else
-          (lambda months: (f"Current Month Snapshot: Spend in {months[-1]} was {monthly[months[-1]]:,.0f}, "
-                           f"top vendor: {list(top_v.keys())[0] if top_v else 'N/A'}."))(sorted(monthly.keys()))))(k.get("monthly", {}), k.get("top_v", {}))
-    ))
+    insights.append(efficiency_insight_summary(eff_summary))
+    insights.append(current_month_snapshot(k.get("monthly", {}), k.get("top_v", {})))
 
     # On-screen insights
     st.markdown("## Procurement Insights (Expanded)")
@@ -606,8 +616,7 @@ try:
     st.markdown("### Vendor Performance")
     if not vendor_perf_df.empty:
         display_df = vendor_perf_df.copy()
-        # format numeric
-        display_df["fulfillment_rate_pct"] = display_df["fulfillment_rate"] * 100
+        display_df["fulfillment_rate_pct"] = (display_df["fulfillment_rate"] * 100).round(1)
         display_df["avg_invoice_lag"] = display_df["avg_invoice_lag"].round(1)
         st.dataframe(display_df[["VENDOR", "total_po_qty", "total_gr_qty", "fulfillment_rate_pct", "on_time_pct", "avg_invoice_lag", "total_spend"]].rename(
             columns={"total_po_qty":"PO Qty","total_gr_qty":"GR Qty","fulfillment_rate_pct":"Fulfillment (%)","on_time_pct":"On-time (%)","avg_invoice_lag":"Avg Inv Lag (days)","total_spend":"Total Spend"}
@@ -630,7 +639,7 @@ try:
 
     # Material performance on-screen
     st.markdown("### Material Category Performance")
-    mat_perf = compute_material_performance(k["df"])
+    mat_perf = (k.get("top_m", {}) or {})
     if mat_perf:
         st.dataframe(pd.DataFrame.from_dict(mat_perf, orient="index", columns=["Spend"]).sort_values("Spend", ascending=False).head(10))
     else:
@@ -651,7 +660,7 @@ try:
         st.info("Not enough data to generate charts.")
     st.caption(AI_TAGLINE)
 
-    # PDF generation button
+    # PDF generation
     if st.button("📄 Generate PDF Report"):
         pdf_buf = generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df)
         safe_name = (company.strip().replace(" ", "_") or "Company")
