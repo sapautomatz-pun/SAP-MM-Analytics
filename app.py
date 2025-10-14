@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v21
-# Fix: add generate_ai_text() back and deliver a complete stable file
+# SAP Automatz – Procurement Analytics v23
+# Changes: PDF bulletized insights + Vendor Performance & Material Category tables + Metrics table in PDF
 
 import os
 import io
@@ -16,6 +16,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import streamlit as st
 from fpdf import FPDF
+
+# Try to import Pillow to measure image pixel dimensions
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
 
 # ---------- CONFIG ----------
 LOGO_PATH = "sapautomatz_logo.png"
@@ -75,6 +82,20 @@ def parse_date_safe(x):
         return pd.to_datetime(x, errors="coerce")
     except Exception:
         return pd.NaT
+
+# ---------- IMAGE SIZING ----------
+def get_image_height_mm(path, display_w_mm=170):
+    fallback = 98.0
+    if not PIL_AVAILABLE:
+        return fallback
+    try:
+        with Image.open(path) as im:
+            w_px, h_px = im.size
+        if w_px == 0:
+            return fallback
+        return (h_px / w_px) * display_w_mm
+    except Exception:
+        return fallback
 
 # ---------- DATA HELPERS ----------
 def parse_amount_and_currency(value, fallback="INR"):
@@ -172,7 +193,6 @@ def prepare_dataframe(df: pd.DataFrame):
         df["GR_STATUS_NORM"] = np.where(df["GR_QTY_NUM"] >= df["PO_QTY_NUM"], "complete", "partial")
     return df
 
-# ---------- KPIs ----------
 def compute_kpis(df: pd.DataFrame):
     df = prepare_dataframe(df)
     totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict() if "CURRENCY_DETECTED" in df.columns else {}
@@ -189,7 +209,6 @@ def compute_kpis(df: pd.DataFrame):
     return {"totals": totals, "total_spend": total_spend, "dominant": dominant,
             "top_v": top_v, "top_m": top_m, "monthly": monthly, "df": df, "records": len(df)}
 
-# ---------- RISK & EFFICIENCY ----------
 def compute_risk(k: dict):
     df = k.get("df", pd.DataFrame())
     total = float(k.get("total_spend", 0.0) or 0.0)
@@ -225,7 +244,6 @@ def compute_efficiency_summary(df: pd.DataFrame):
         eff[v] = {"avg_cost": ac, "total_spend": ts, "units_est": units}
     return eff
 
-# ---------- VENDOR PERFORMANCE ----------
 def compute_vendor_performance(df: pd.DataFrame):
     if "VENDOR" not in df.columns or df.empty:
         return pd.DataFrame()
@@ -343,9 +361,7 @@ def vendor_performance_insight_extended(vperf_df: pd.DataFrame):
     ]
     return " ".join(lines)
 
-# ---------- generate_ai_text (restored) ----------
 def generate_ai_text(k: dict):
-    """Short executive summary text derived from KPIs."""
     total = k.get("total_spend", 0.0)
     currency = k.get("dominant", "INR")
     top_v = list(k.get("top_v", {}).keys())[:3]
@@ -358,7 +374,6 @@ def generate_ai_text(k: dict):
         exposure_text = f" with {exposure_pct:.1f}% exposure in {', '.join(other[:3])}"
     else:
         exposure_text = ""
-    # risk summary
     risk_est = ""
     try:
         risk = compute_risk(k)
@@ -462,6 +477,42 @@ class PDF(FPDF):
         self.set_text_color(100, 100, 100)
         self.cell(0, 10, f"SAP Automatz | Page {self.page_no()}", 0, 0, "C")
 
+def _pdf_table_row(pdf, row_cells, col_widths, font_size=9, alignments=None):
+    """Render a single table row. row_cells: list of strings, col_widths mm, alignments optional list ('L','C','R')"""
+    if alignments is None:
+        alignments = ['L'] * len(row_cells)
+    max_h = 0
+    # compute max lines (approx) using a temporary small cell? We'll just use multi_cell for each cell with same height trick:
+    y_start = pdf.get_y()
+    x_start = pdf.get_x()
+    # first pass: compute heights per cell using multi_cell on imaginary copy by saving Y and resetting
+    heights = []
+    for text, w in zip(row_cells, col_widths):
+        # estimate lines: use split according to width - crude but practical
+        # set font
+        pdf.set_font("Helvetica", size=font_size)
+        # compute string width in current font
+        # FPDF has get_string_width
+        sw = pdf.get_string_width(sanitize_for_pdf(text))
+        # lines = ceil(sw / (w * char_mm_est)) - rough, but simpler: create lines by splitting at spaces for safety
+        # We'll just set a fixed row height per font_size and number of wrapped lines estimation:
+        est_chars_per_line = max(20, int(w * 2.8))  # heuristic
+        lines = int(np.ceil(len(sanitize_for_pdf(text)) / max(1, est_chars_per_line)))
+        heights.append(lines * (font_size * 0.35 + 2))
+    max_h = max(heights) if heights else font_size * 1.5
+    # ensure space
+    ensure_pdf_space(pdf, max_h + 2)
+    # draw cells
+    for i, (text, w) in enumerate(zip(row_cells, col_widths)):
+        pdf.set_font("Helvetica", size=font_size)
+        align = alignments[i] if i < len(alignments) else 'L'
+        x = pdf.get_x()
+        y = pdf.get_y()
+        # create a multicell with border 1 for header rows else 0
+        pdf.multi_cell(w, max_h / (font_size * 0.35 + 2) * (font_size * 0.35 + 2), sanitize_for_pdf(text), border=1, align=align)
+        pdf.set_xy(x + w, y)
+    pdf.ln(max_h / (font_size * 0.35 + 2) * (font_size * 0.35 + 2))
+
 def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf = PDF(); pdf.alias_nb_pages(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 20); pdf.set_text_color(*BRAND_BLUE)
@@ -473,71 +524,124 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf.ln(6); pdf.set_font("Helvetica", "I", 9); pdf.cell(0, 6, sanitize_for_pdf(AI_TAGLINE), ln=True)
     pdf.ln(8)
 
-    ensure_pdf_space(pdf, 40 + len(insights) * 7)
+    # Procurement Insights as bullet points
+    ensure_pdf_space(pdf, 40 + len(insights) * 6)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Procurement Insights (Expanded)"), ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 11)
     for ins in insights:
         ensure_pdf_space(pdf, 10)
-        pdf.multi_cell(0, 7, sanitize_for_pdf(ins))
-    pdf.ln(6)
+        # bullet with multi_cell (indent)
+        pdf.cell(6)  # indent
+        pdf.multi_cell(0, 6, "- " + sanitize_for_pdf(ins))
+    pdf.ln(4)
 
+    # Executive summary
     ensure_pdf_space(pdf, 40)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Executive Summary"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12); pdf.multi_cell(0, 7, sanitize_for_pdf(ai_text))
     pdf.ln(6)
 
+    # Key Performance Metrics as a compact 2-column table
     metrics = [
-        f"Total Spend: {k['total_spend']:,.2f} {k['dominant']}",
-        f"Records: {k['records']}",
-        f"Vendors (Top shown): {len(k['top_v'])}",
-        f"Materials (Top shown): {len(k['top_m'])}",
-        f"Risk Score: {risk['score']:.1f} ({risk['band']})"
+        ("Total Spend", f"{k['total_spend']:,.2f} {k['dominant']}"),
+        ("Records", f"{k['records']}"),
+        ("Vendors (Top shown)", f"{len(k['top_v'])}"),
+        ("Materials (Top shown)", f"{len(k['top_m'])}"),
+        ("Risk Score", f"{risk['score']:.1f} ({risk['band']})")
     ]
-    ensure_pdf_space(pdf, 12 + len(metrics)*7)
+    ensure_pdf_space(pdf, 12 + len(metrics) * 8)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Key Performance Metrics"), ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-    for m in metrics:
-        ensure_pdf_space(pdf, 8)
-        pdf.cell(0, 7, "- " + sanitize_for_pdf(m), ln=True)
+    pdf.ln(2)
+    # table header
+    col_w = [90, 90]
+    pdf.set_font("Helvetica", "B", 10)
+    _pdf_table_row(pdf, ["Metric", "Value"], col_w, font_size=10, alignments=['L','R'])
+    pdf.set_font("Helvetica", "", 10)
+    for kname, kval in metrics:
+        _pdf_table_row(pdf, [kname, kval], col_w, font_size=10, alignments=['L','R'])
     pdf.ln(6)
 
-    ensure_pdf_space(pdf, 40)
-    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Vendor Performance Summary"), ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    # Vendor Performance table into PDF (top N)
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Vendor Performance (Top)"), ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
     if not vendor_perf_df.empty:
-        valid = vendor_perf_df.dropna(subset=["fulfillment_rate"])
-        if not valid.empty:
-            top = valid.sort_values("fulfillment_rate", ascending=False).iloc[0]
-            bot = valid.sort_values("fulfillment_rate", ascending=True).iloc[0]
-            pdf.multi_cell(0, 7, sanitize_for_pdf(f"Top performing vendor: {top['VENDOR']} (Fulfillment {top['fulfillment_rate']*100:.1f}%; On-time {top['on_time_pct']:.1f}%)."))
-            pdf.multi_cell(0, 7, sanitize_for_pdf(f"Lowest performing vendor: {bot['VENDOR']} (Fulfillment {bot['fulfillment_rate']*100:.1f}%; On-time {bot['on_time_pct']:.1f}%)."))
-        else:
-            pdf.multi_cell(0, 7, sanitize_for_pdf("Not enough quantity data to compute vendor fulfillment rates."))
+        # pick top 10 by spend
+        vdf = vendor_perf_df.copy().head(10)
+        headers = ["Vendor", "PO Qty", "GR Qty", "Fulfill (%)", "On-time (%)", "Avg Inv Lag", "Total Spend"]
+        # column widths (sum <= ~180)
+        col_w = [50, 18, 18, 22, 18, 22, 30]
+        pdf.set_font("Helvetica", "B", 9)
+        _pdf_table_row(pdf, headers, col_w, font_size=9, alignments=['L','R','R','R','R','R','R'])
+        pdf.set_font("Helvetica", "", 9)
+        for _, row in vdf.iterrows():
+            vendor = row.get("VENDOR", "")
+            poq = int(row.get("total_po_qty") or 0)
+            grq = int(row.get("total_gr_qty") or 0)
+            fulfill = (row.get("fulfillment_rate") * 100.0) if pd.notna(row.get("fulfillment_rate")) else np.nan
+            ontime = row.get("on_time_pct") if pd.notna(row.get("on_time_pct")) else np.nan
+            invlag = row.get("avg_invoice_lag") if pd.notna(row.get("avg_invoice_lag")) else ""
+            tspend = row.get("total_spend") if pd.notna(row.get("total_spend")) else 0.0
+            cells = [
+                vendor,
+                f"{poq}",
+                f"{grq}",
+                f"{fulfill:.1f}" if not pd.isna(fulfill) else "",
+                f"{ontime:.1f}" if not pd.isna(ontime) else "",
+                f"{invlag:.1f}" if isinstance(invlag, (int, float)) and not pd.isna(invlag) else "",
+                f"{tspend:,.2f}"
+            ]
+            _pdf_table_row(pdf, cells, col_w, font_size=8, alignments=['L','R','R','R','R','R','R'])
     else:
-        pdf.multi_cell(0, 7, sanitize_for_pdf("Vendor performance metrics not available."))
+        pdf.multi_cell(0, 6, "Vendor performance data not available.")
     pdf.ln(6)
 
+    # Material Category Performance table
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Material Category Performance"), ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
+    mat = k.get("top_m", {}) or {}
+    if mat:
+        # convert to list sorted
+        items = list(mat.items())
+        items = sorted(items, key=lambda x: x[1], reverse=True)[:12]
+        col_w = [120, 60]
+        pdf.set_font("Helvetica", "B", 9)
+        _pdf_table_row(pdf, ["Material", "Spend"], col_w, font_size=9, alignments=['L','R'])
+        pdf.set_font("Helvetica", "", 9)
+        for m, val in items:
+            _pdf_table_row(pdf, [m, f"{val:,.2f}"], col_w, font_size=9, alignments=['L','R'])
+    else:
+        pdf.multi_cell(0, 6, "Material category data not available.")
+    pdf.ln(6)
+
+    # Charts: each on new page if present (computed heights)
     if charts:
         pdf.add_page()
         pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Dashboard Charts"), ln=True)
         pdf.set_text_color(0, 0, 0); pdf.ln(4)
         captions = ["Monthly Spend Trend", "Top Vendors (Bar)", "Risk Breakdown", "Vendor Fulfillment Rate", "Material Spend Distribution"]
+        display_w_mm = 170.0
         for idx, ch in enumerate(charts):
-            ensure_pdf_space(pdf, 110)
+            img_h_mm = get_image_height_mm(ch, display_w_mm)
+            total_needed = img_h_mm + 18
+            ensure_pdf_space(pdf, total_needed)
+            y = pdf.get_y()
             try:
-                y = pdf.get_y() + 6
-                pdf.image(ch, x=20, y=y, w=170)
-                pdf.ln(98)
-                pdf.set_font("Helvetica", "I", 10)
-                pdf.set_text_color(80, 80, 120)
-                cap = captions[idx] if idx < len(captions) else f"Figure {idx+1}"
-                pdf.cell(0, 6, sanitize_for_pdf(f"Figure {idx+1}: {cap}"), ln=True, align="C")
-                pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-                pdf.ln(6)
+                pdf.image(ch, x=20, y=y, w=display_w_mm)
             except Exception:
-                continue
+                try:
+                    pdf.image(ch, x=20, w=display_w_mm)
+                except Exception:
+                    continue
+            pdf.set_y(y + img_h_mm + 6)
+            pdf.set_font("Helvetica", "I", 10)
+            pdf.set_text_color(80, 80, 120)
+            cap = captions[idx] if idx < len(captions) else f"Figure {idx+1}"
+            pdf.cell(0, 6, sanitize_for_pdf(f"Figure {idx+1}: {cap}"), ln=True, align="C")
+            pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+            pdf.ln(6)
 
+    # Risk Summary
     ensure_pdf_space(pdf, 40)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Risk Summary"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
