@@ -1,6 +1,6 @@
 # app.py
 # SAP Automatz – Procurement Analytics (SLA per-row/vendor/material support)
-# v26 — adds per-row SLA precedence, optional vendor SLA upload, sidebar default
+# v26.1 — fixes: dynamic PDF column autosizing to prevent overflow/wrap/garbage in tables
 
 import os
 import io
@@ -49,10 +49,13 @@ st.session_state.setdefault("verified", False)
 
 # ---------- UTIL ----------
 def sanitize_for_pdf(s: str) -> str:
+    """Normalize and ASCII-safe string for PDF rendering."""
     if s is None:
         return ""
     s = str(s)
+    # replace known problematic unicode with ASCII equivalents
     s = s.replace("–", "-").replace("—", "-").replace("•", "-").replace("“", '"').replace("”", '"').replace("’", "'")
+    s = s.replace("\t", " ").replace("\r", " ")
     s_norm = unicodedata.normalize("NFKD", s)
     s_ascii = s_norm.encode("ascii", "ignore").decode("ascii")
     s_ascii = re.sub(r"\s+", " ", s_ascii).strip()
@@ -201,6 +204,7 @@ def prepare_dataframe(df: pd.DataFrame):
 
     return df
 
+# ---------- KPI / RISK / EFFICIENCY (unchanged) ----------
 def compute_kpis(df: pd.DataFrame):
     df = prepare_dataframe(df)
     totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict() if "CURRENCY_DETECTED" in df.columns else {}
@@ -292,33 +296,26 @@ def apply_threshold_precedence(df, vendor_sla_map=None, global_default=7):
     """
     df = df.copy()
     vendor_sla_map = vendor_sla_map or {}
-    # ensure SLA columns numeric (prepare_dataframe already did this but re-check)
     for c in ["SLA_DAYS", "VENDOR_SLA", "MATERIAL_SLA"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
             df.loc[df[c] < 0, c] = np.nan
 
     def choose_threshold(r):
-        # 1) SLA_DAYS column
         if pd.notna(r.get("SLA_DAYS")):
             return int(r["SLA_DAYS"])
-        # 2) uploaded vendor SLA mapping
         v = r.get("VENDOR")
         if isinstance(v, str) and v in vendor_sla_map:
             try:
                 return int(vendor_sla_map[v])
             except Exception:
                 pass
-        # 3) VENDOR_SLA column on row
         if pd.notna(r.get("VENDOR_SLA")):
             return int(r["VENDOR_SLA"])
-        # 4) MATERIAL_SLA column
         if pd.notna(r.get("MATERIAL_SLA")):
             return int(r["MATERIAL_SLA"])
-        # fallback
         return int(global_default)
 
-    # apply
     df["ON_TIME_THRESHOLD"] = df.apply(choose_threshold, axis=1)
     return df
 
@@ -331,19 +328,15 @@ def compute_vendor_performance(df: pd.DataFrame):
     if "VENDOR" not in df.columns or df.empty:
         return pd.DataFrame()
     df_rows = df.copy()
-    # compute gr_days and invoice_lag
     df_rows["gr_days"] = (df_rows["GR_DATE"] - df_rows["PO_DATE"]).dt.days
     df_rows["invoice_lag"] = (df_rows["INVOICE_DATE"] - df_rows["GR_DATE"]).dt.days
-    # is_on_time using per-row threshold
     df_rows["is_on_time"] = False
     mask = (~df_rows["GR_DATE"].isna()) & (~df_rows["PO_DATE"].isna())
     if mask.any():
-        # apply per-row comparison
         df_rows.loc[mask, "is_on_time"] = df_rows.loc[mask].apply(lambda r: (pd.notna(r["gr_days"]) and pd.notna(r["ON_TIME_THRESHOLD"]) and r["gr_days"] <= r["ON_TIME_THRESHOLD"]), axis=1)
 
     df_rows["is_partial"] = np.where(df_rows["GR_QTY_NUM"] < df_rows["PO_QTY_NUM"], 1, 0)
 
-    # aggregate
     g = df_rows.groupby("VENDOR").agg(
         total_po_qty=pd.NamedAgg(column="PO_QTY_NUM", aggfunc="sum"),
         total_gr_qty=pd.NamedAgg(column="GR_QTY_NUM", aggfunc="sum"),
@@ -355,14 +348,12 @@ def compute_vendor_performance(df: pd.DataFrame):
         applied_sla_mean=pd.NamedAgg(column="ON_TIME_THRESHOLD", aggfunc=lambda x: int(np.round(np.nanmean(x))) if x.notna().any() else np.nan),
         rows_count=pd.NamedAgg(column="VENDOR", aggfunc="count")
     )
-    # derived fields
     g["fulfillment_rate"] = np.where(g["total_po_qty"] > 0, g["total_gr_qty"] / g["total_po_qty"], 0.0)
     g["ontime_pct"] = g["ontime_pct"].fillna(0.0) * 100.0
     g["partial_pct"] = g["partial_pct"].fillna(0.0) * 100.0
     g["avg_gr_days"] = g["avg_gr_days"].fillna(np.nan)
     g["avg_invoice_lag"] = g["avg_invoice_lag"].fillna(np.nan)
     g = g.reset_index().rename(columns={"index": "VENDOR"})
-    # reorder/rename for clarity
     out = g[["VENDOR", "applied_sla_mean", "total_po_qty", "total_gr_qty", "fulfillment_rate", "ontime_pct", "partial_pct", "avg_gr_days", "avg_invoice_lag", "total_spend", "rows_count"]]
     out = out.rename(columns={"applied_sla_mean": "SLA_days", "total_po_qty": "total_po_qty", "total_gr_qty": "total_gr_qty"})
     out = out.sort_values("total_spend", ascending=False).reset_index(drop=True)
@@ -545,7 +536,7 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
         plt.close()
     return charts
 
-# ---------- PDF helpers (unchanged from v25, with SLA column included) ----------
+# ---------- PDF helpers (updated to autoscale columns) ----------
 def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
     try:
         bottom_limit = pdf_obj.h - pdf_obj.b_margin
@@ -575,26 +566,62 @@ class PDF(FPDF):
         self.set_text_color(100, 100, 100)
         self.cell(0, 10, f"SAP Automatz | Page {self.page_no()}", 0, 0, "C")
 
-def _pdf_table_row(pdf, row_cells, col_widths, font_size=9, alignments=None):
+def _normalize_col_widths(pdf: PDF, col_w, ncols):
+    """
+    Scale/provide column widths so they exactly fit the usable PDF width (mm).
+    - pdf: PDF instance
+    - col_w: list of proposed widths (can be any scale); if None or length mismatch create equal widths.
+    - ncols: number of columns expected
+    Returns list of widths (mm) length == ncols.
+    """
+    usable = pdf.w - pdf.l_margin - pdf.r_margin  # mm
+    if not col_w or len(col_w) != ncols:
+        # equal distribution
+        return [usable / ncols for _ in range(ncols)]
+    total = sum(col_w)
+    if total <= 0:
+        return [usable / ncols for _ in range(ncols)]
+    factor = usable / total
+    w_scaled = [max(6.0, float(w) * factor) for w in col_w]  # ensure min width of 6mm
+    # re-normalize to exact usable sum (avoid rounding gaps)
+    s = sum(w_scaled)
+    if abs(s - usable) > 0.01:
+        diff = usable - s
+        w_scaled[0] += diff  # add remaining to first column
+    return w_scaled
+
+def _pdf_table_row(pdf, row_cells, col_widths=None, font_size=9, alignments=None):
+    """
+    Render a row with dynamic wrapping and autoscaled widths.
+    - col_widths can be None or a proposal; this function will normalize to usable width.
+    """
+    ncols = len(row_cells)
+    col_widths_norm = _normalize_col_widths(pdf, col_widths, ncols)
     if alignments is None:
-        alignments = ['L'] * len(row_cells)
+        alignments = ['L'] * ncols
     sanitized = [sanitize_for_pdf(str(x)) for x in row_cells]
+    # compute estimated lines for each cell given width
     est_lines = []
-    for text, w in zip(sanitized, col_widths):
-        chars_per_line = max(10, int(w * 2.8))
+    for text, w in zip(sanitized, col_widths_norm):
+        # approx characters per line depends on width - heuristic (adjust if needed)
+        chars_per_line = max(12, int(w * 3.0))
         lines = int(np.ceil(len(text) / max(1, chars_per_line)))
+        # also account for explicit newlines
+        lines = max(lines, text.count("\n") + 1)
         est_lines.append(lines)
     lines_needed = max(est_lines) if est_lines else 1
-    line_h = font_size * 0.35 + 2
+    line_h = max(4.0, font_size * 0.35 + 2)
     cell_h = lines_needed * line_h
     ensure_pdf_space(pdf, cell_h + 2)
     x_start = pdf.get_x()
     y_start = pdf.get_y()
-    for i, (text, w) in enumerate(zip(sanitized, col_widths)):
+    # draw each cell as multi_cell then move x cursor forward
+    for i, (text, w) in enumerate(zip(sanitized, col_widths_norm)):
         pdf.set_font("Helvetica", size=font_size)
         align = alignments[i] if i < len(alignments) else 'L'
         x = pdf.get_x()
         y = pdf.get_y()
+        # multi_cell will move to next line; by restoring x position we maintain same row
         pdf.multi_cell(w, line_h, text, border=1, align=align)
         pdf.set_xy(x + w, y)
     pdf.ln(cell_h)
@@ -617,7 +644,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 11)
     for ins in insights:
         ensure_pdf_space(pdf, 10)
-        pdf.cell(6)  # indent
+        pdf.cell(6)
         pdf.multi_cell(0, 6, "- " + sanitize_for_pdf(ins))
     pdf.ln(4)
 
@@ -627,7 +654,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12); pdf.multi_cell(0, 7, sanitize_for_pdf(ai_text))
     pdf.ln(6)
 
-    # Key Performance Metrics as a compact 2-column table
+    # Key Performance Metrics
     metrics = [
         ("Total Spend", f"{k['total_spend']:,.2f} {k['dominant']}"),
         ("Records", f"{k['records']}"),
@@ -646,18 +673,19 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         _pdf_table_row(pdf, [kname, kval], col_w, font_size=10, alignments=['L','R'])
     pdf.ln(6)
 
-    # Vendor Performance - include SLA_days column
+    # Vendor Performance - include SLA_days column; use dynamic width normalization
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Vendor Performance (Top)"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
     if not vendor_perf_df.empty:
-        vdf = vendor_perf_df.copy().head(10)
+        vdf = vendor_perf_df.copy().head(12)
         headers = ["Vendor", "SLA (d)", "PO Qty", "GR Qty", "Fulfill %", "On-time %", "Partial %", "Avg GR d", "Avg Inv Lag (d)", "Total Spend"]
-        col_w = [55, 14, 16, 16, 18, 18, 18, 18, 20, 26]  # adjusted widths
+        # Proposal widths (will be normalized to page width)
+        proposed_w = [60, 12, 14, 14, 16, 16, 16, 12, 16, 24]
         pdf.set_font("Helvetica", "B", 9)
-        _pdf_table_row(pdf, [sanitize_for_pdf(h) for h in headers], col_w, font_size=9, alignments=['L'] + ['R'] * (len(col_w)-1))
+        _pdf_table_row(pdf, [sanitize_for_pdf(h) for h in headers], proposed_w, font_size=9, alignments=['L'] + ['R'] * (len(headers)-1))
         pdf.set_font("Helvetica", "", 9)
         for _, row in vdf.iterrows():
-            vendor = row.get("VENDOR", "")
+            vendor = sanitize_for_pdf(row.get("VENDOR", ""))
             sla = int(row.get("SLA_days")) if pd.notna(row.get("SLA_days")) else ""
             poq = int(row.get("total_po_qty") or 0)
             grq = int(row.get("total_gr_qty") or 0)
@@ -679,7 +707,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
                 f"{invlag:.1f}" if isinstance(invlag, (int, float)) and not pd.isna(invlag) else "",
                 f"{tspend:,.2f}"
             ]
-            _pdf_table_row(pdf, cells, col_w, font_size=8, alignments=['L'] + ['R'] * (len(col_w)-1))
+            _pdf_table_row(pdf, cells, proposed_w, font_size=8, alignments=['L'] + ['R'] * (len(headers)-1))
     else:
         pdf.multi_cell(0, 6, "Vendor performance data not available.")
     pdf.ln(6)
@@ -765,7 +793,6 @@ if not st.session_state["verified"]:
 st.sidebar.header("SLA / Thresholds")
 default_on_time_days = st.sidebar.slider("Default on-time threshold (days)", min_value=0, max_value=90, value=7, help="Default PO -> GR SLA in days if none specified per PO/vendor/material")
 st.sidebar.markdown("You can also upload a Vendor SLA CSV with columns `VENDOR,SLA_DAYS` (optional).")
-
 vendor_sla_file = st.sidebar.file_uploader("Optional: Vendor SLA file (CSV)", type=["csv"], key="vendor_sla_upload")
 
 file = st.file_uploader("Upload Procurement File (CSV/XLSX) — include SLA_DAYS / VENDOR_SLA / MATERIAL_SLA if you want per-row thresholds", type=["csv", "xlsx"])
@@ -829,7 +856,6 @@ try:
     st.markdown("### Vendor Performance")
     if not vendor_perf_df.empty:
         display_df = vendor_perf_df.copy()
-        # rename columns to friendlier labels
         display_df = display_df.rename(columns={
             "SLA_days":"SLA (d)",
             "total_po_qty":"PO Qty",
