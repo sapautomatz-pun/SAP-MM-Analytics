@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v20
-# Fix: restore missing insight functions and tighten up insight assembly
+# SAP Automatz – Procurement Analytics v21
+# Fix: add generate_ai_text() back and deliver a complete stable file
 
 import os
 import io
@@ -94,12 +94,10 @@ def parse_amount_and_currency(value, fallback="INR"):
         return 0.0, detected
 
 def detect_column(df_cols, candidates):
-    """Return first matching column name in df_cols for a list of possible names (case-insensitive)."""
     cols_upper = {c.upper(): c for c in df_cols}
     for cand in candidates:
         if cand.upper() in cols_upper:
             return cols_upper[cand.upper()]
-    # fuzzy: find containing keywords
     for c in df_cols:
         cu = c.upper()
         for cand in candidates:
@@ -109,21 +107,17 @@ def detect_column(df_cols, candidates):
 
 def prepare_dataframe(df: pd.DataFrame):
     df = df.copy()
-    # normalize column names
     df.columns = [c.strip() for c in df.columns]
 
-    # detect key columns (allow flexible names)
     amt_col = detect_column(df.columns, ["AMOUNT", "AMT", "VALUE"])
     if amt_col and amt_col != "AMOUNT":
         df.rename(columns={amt_col: "AMOUNT"}, inplace=True)
-    # quantity columns
-    po_qty_col = detect_column(df.columns, ["PO_QTY", "POQTY", "QTY", "ORDER_QTY", "PO_QTY"])
+    po_qty_col = detect_column(df.columns, ["PO_QTY", "POQTY", "QTY", "ORDER_QTY"])
     if po_qty_col and po_qty_col != "PO_QTY":
         df.rename(columns={po_qty_col: "PO_QTY"}, inplace=True)
     gr_qty_col = detect_column(df.columns, ["GR_QTY", "RECEIVED_QTY", "GRQTY", "RECV_QTY"])
     if gr_qty_col and gr_qty_col != "GR_QTY":
         df.rename(columns={gr_qty_col: "GR_QTY"}, inplace=True)
-    # dates
     po_date_col = detect_column(df.columns, ["PO_DATE", "ORDER_DATE", "DOC_DATE"])
     if po_date_col and po_date_col != "PO_DATE":
         df.rename(columns={po_date_col: "PO_DATE"}, inplace=True)
@@ -133,18 +127,15 @@ def prepare_dataframe(df: pd.DataFrame):
     inv_date_col = detect_column(df.columns, ["INVOICE_DATE", "BILL_DATE", "INV_DATE"])
     if inv_date_col and inv_date_col != "INVOICE_DATE":
         df.rename(columns={inv_date_col: "INVOICE_DATE"}, inplace=True)
-    # status
     gr_status_col = detect_column(df.columns, ["GR_STATUS", "GRSTATUS", "RECEIPT_STATUS", "RECV_STATUS"])
     if gr_status_col and gr_status_col != "GR_STATUS":
         df.rename(columns={gr_status_col: "GR_STATUS"}, inplace=True)
 
-    # ensure columns exist
     if "AMOUNT" not in df.columns:
         df["AMOUNT"] = 0.0
     if "CURRENCY" not in df.columns:
         df["CURRENCY"] = "INR"
 
-    # numeric amount + detected currency
     amounts = []
     currencies = []
     for _, r in df.iterrows():
@@ -153,7 +144,6 @@ def prepare_dataframe(df: pd.DataFrame):
     df["AMOUNT_NUM"] = amounts
     df["CURRENCY_DETECTED"] = currencies
 
-    # quantities
     if "PO_QTY" in df.columns:
         df["PO_QTY_NUM"] = df["PO_QTY"].apply(to_int_safe)
     else:
@@ -163,7 +153,6 @@ def prepare_dataframe(df: pd.DataFrame):
     else:
         df["GR_QTY_NUM"] = 0
 
-    # dates
     if "PO_DATE" in df.columns:
         df["PO_DATE"] = pd.to_datetime(df["PO_DATE"], errors="coerce")
     else:
@@ -177,7 +166,6 @@ def prepare_dataframe(df: pd.DataFrame):
     else:
         df["INVOICE_DATE"] = pd.NaT
 
-    # GR status normalization
     if "GR_STATUS" in df.columns:
         df["GR_STATUS_NORM"] = df["GR_STATUS"].astype(str).str.lower().str.strip()
     else:
@@ -268,7 +256,7 @@ def compute_vendor_performance(df: pd.DataFrame):
     g = g.reset_index().rename(columns={"index": "VENDOR"})
     return g
 
-# ---------- INSIGHTS (complete) ----------
+# ---------- INSIGHTS ----------
 def currency_exposure_insight_extended(totals: dict):
     if not totals:
         return "Currency Exposure: No currency data available."
@@ -355,10 +343,34 @@ def vendor_performance_insight_extended(vperf_df: pd.DataFrame):
     ]
     return " ".join(lines)
 
+# ---------- generate_ai_text (restored) ----------
+def generate_ai_text(k: dict):
+    """Short executive summary text derived from KPIs."""
+    total = k.get("total_spend", 0.0)
+    currency = k.get("dominant", "INR")
+    top_v = list(k.get("top_v", {}).keys())[:3]
+    top_v_text = ", ".join(top_v) if top_v else "no major vendors identified"
+    totals = k.get("totals", {})
+    if totals and len(totals) > 1:
+        other = [c for c in totals.keys() if c != currency]
+        exposure = sum(v for c, v in totals.items() if c != currency)
+        exposure_pct = (exposure / (total + 1e-9)) * 100.0
+        exposure_text = f" with {exposure_pct:.1f}% exposure in {', '.join(other[:3])}"
+    else:
+        exposure_text = ""
+    # risk summary
+    risk_est = ""
+    try:
+        risk = compute_risk(k)
+        risk_est = f" Risk Score: {risk['score']:.1f} ({risk['band']})."
+    except Exception:
+        risk_est = ""
+    return (f"Total procurement spend was {total:,.2f} {currency}{exposure_text}. "
+            f"Top vendors by spend: {top_v_text}.{risk_est} Overall procurement performance indicates opportunities in vendor optimization, delivery fulfillment, and invoice processing.")
+
 # ---------- CHARTS ----------
 def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame):
     charts = []
-    # Monthly trend
     try:
         if k.get("monthly"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -370,7 +382,6 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Top vendors by spend
     try:
         if k.get("top_v"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -382,7 +393,6 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Risk breakdown
     try:
         if risk.get("breakdown"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -394,7 +404,6 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Vendor fulfillment chart
     try:
         if not vendor_perf_df.empty:
             dfv = vendor_perf_df.copy().head(8)
@@ -408,7 +417,6 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Material pie
     try:
         mat = k.get("top_m", {})
         if mat:
@@ -510,7 +518,6 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         pdf.multi_cell(0, 7, sanitize_for_pdf("Vendor performance metrics not available."))
     pdf.ln(6)
 
-    # Charts start on new page
     if charts:
         pdf.add_page()
         pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Dashboard Charts"), ln=True)
@@ -576,10 +583,8 @@ try:
     risk = compute_risk(k)
     ai_text = generate_ai_text(k)
 
-    # vendor perf DF
     vendor_perf_df = compute_vendor_performance(k["df"])
 
-    # Build insights using defined functions
     insights = []
     insights.append(currency_exposure_insight_extended(k.get("totals", {})))
     insights.append(monthly_quarterly_trend_insight_extended(k.get("monthly", {})))
@@ -590,15 +595,14 @@ try:
     insights.append(efficiency_insight_summary(eff_summary))
     insights.append(current_month_snapshot(k.get("monthly", {}), k.get("top_v", {})))
 
-    # On-screen insights
     st.markdown("## Procurement Insights (Expanded)")
     for ins in insights:
         st.write(ins)
     st.caption(AI_TAGLINE)
 
-    # Executive summary & metrics
     st.markdown("## Executive Summary")
     st.write(ai_text)
+
     st.markdown("### Key Performance Metrics")
     cols = st.columns(5)
     metrics_vals = [
@@ -612,7 +616,6 @@ try:
     for c, label, val in zip(cols, labels, metrics_vals):
         c.metric(label, str(val))
 
-    # Vendor performance on-screen table
     st.markdown("### Vendor Performance")
     if not vendor_perf_df.empty:
         display_df = vendor_perf_df.copy()
@@ -624,7 +627,6 @@ try:
     else:
         st.write("No vendor quantity/GR/invoice data available.")
 
-    # Efficiency on-screen
     st.markdown("### Efficiency Analysis")
     if eff_summary:
         sorted_eff = sorted(eff_summary.items(), key=lambda x: x[1]["avg_cost"])
@@ -637,7 +639,6 @@ try:
     else:
         st.write("Efficiency data not available.")
 
-    # Material performance on-screen
     st.markdown("### Material Category Performance")
     mat_perf = (k.get("top_m", {}) or {})
     if mat_perf:
@@ -645,7 +646,6 @@ try:
     else:
         st.write("No material performance data available.")
 
-    # Charts
     st.markdown("### Dashboard Charts")
     charts = generate_dashboard_charts(k, risk, vendor_perf_df)
     if charts:
@@ -660,7 +660,6 @@ try:
         st.info("Not enough data to generate charts.")
     st.caption(AI_TAGLINE)
 
-    # PDF generation
     if st.button("📄 Generate PDF Report"):
         pdf_buf = generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df)
         safe_name = (company.strip().replace(" ", "_") or "Company")
