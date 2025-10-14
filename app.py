@@ -1,6 +1,7 @@
 # app.py
-# SAP Automatz – Procurement Analytics v14
-# Fix: all dashboards show, blue section headings, polished final version
+# SAP Automatz – Procurement Analytics v15 (Final)
+# Adds extended narrative insights, material pie chart, supplier relationship insight,
+# dashboards starting on a new PDF page, and other final polish.
 
 import os
 import io
@@ -8,6 +9,7 @@ import re
 import datetime
 import tempfile
 import traceback
+import math
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -21,8 +23,9 @@ LOGO_PATH = "sapautomatz_logo.png"
 TAGLINE = "Automate. Analyze. Accelerate."
 AI_TAGLINE = "Insights generated automatically by SAP Automatz AI Engine"
 VALID_KEYS = {"SAPMM-00000000000000", "DEMO-ACCESS-12345"}
+BRAND_BLUE = (26, 35, 126)  # #1a237e
 
-# ---------- STREAMLIT ----------
+# ---------- STREAMLIT SETUP ----------
 st.set_page_config(page_title="SAP Automatz – Procurement Analytics", layout="wide")
 st.markdown("<style>.stApp header{visibility:hidden}</style>", unsafe_allow_html=True)
 
@@ -31,11 +34,8 @@ with col_logo:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=110)
 with col_title:
-    st.markdown(
-        "<h2 style='color:#1a237e;margin-bottom:0'>SAP Automatz – Procurement Analytics</h2>"
-        f"<p style='margin-top:0;color:#555;'>{TAGLINE}</p>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<h2 style='color:#1a237e;margin-bottom:0'>SAP Automatz – Procurement Analytics</h2>"
+                f"<p style='margin-top:0;color:#555;'>{TAGLINE}</p>", unsafe_allow_html=True)
 st.divider()
 
 st.session_state.setdefault("verified", False)
@@ -53,12 +53,14 @@ def parse_amount_and_currency(value, fallback="INR"):
             s = s.replace(sym, "")
     s = re.sub(r"[^\d.\-]", "", s)
     try:
-        return float(s), detected
+        return float(s) if s not in ("", ".", "-", "-.") else 0.0, detected
     except Exception:
         return 0.0, detected
 
 def prepare_dataframe(df: pd.DataFrame):
+    df = df.copy()
     df.columns = [c.strip().upper() for c in df.columns]
+    # find amount-like column if not present
     if "AMOUNT" not in df.columns:
         for c in df.columns:
             if "AMT" in c.upper():
@@ -66,15 +68,18 @@ def prepare_dataframe(df: pd.DataFrame):
                 break
     if "CURRENCY" not in df.columns:
         df["CURRENCY"] = "INR"
-    df["AMOUNT_NUM"], df["CURRENCY_DETECTED"] = zip(
-        *df.apply(lambda r: parse_amount_and_currency(r.get("AMOUNT", 0), r.get("CURRENCY", "INR")), axis=1)
-    )
+    amounts, currencies = [], []
+    for _, r in df.iterrows():
+        a, c = parse_amount_and_currency(r.get("AMOUNT", 0), r.get("CURRENCY", "INR"))
+        amounts.append(a); currencies.append(c)
+    df["AMOUNT_NUM"] = amounts
+    df["CURRENCY_DETECTED"] = currencies
     return df
 
-def compute_kpis(df):
+def compute_kpis(df: pd.DataFrame):
     df = prepare_dataframe(df)
-    totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict()
-    total_spend = sum(totals.values())
+    totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict() if "CURRENCY_DETECTED" in df.columns else {}
+    total_spend = float(sum(totals.values())) if totals else float(df["AMOUNT_NUM"].sum()) if "AMOUNT_NUM" in df.columns else 0.0
     dominant = max(totals, key=totals.get) if totals else "INR"
     top_v = df.groupby("VENDOR")["AMOUNT_NUM"].sum().nlargest(10).to_dict() if "VENDOR" in df.columns else {}
     top_m = df.groupby("MATERIAL")["AMOUNT_NUM"].sum().nlargest(10).to_dict() if "MATERIAL" in df.columns else {}
@@ -88,9 +93,9 @@ def compute_kpis(df):
     return {"totals": totals, "total_spend": total_spend, "dominant": dominant,
             "top_v": top_v, "top_m": top_m, "monthly": monthly, "df": df, "records": len(df)}
 
-def compute_risk(k):
+def compute_risk(k: dict):
     df = k.get("df", pd.DataFrame())
-    total = k.get("total_spend", 0.0)
+    total = float(k.get("total_spend", 0.0) or 0.0)
     if total == 0 or df.empty:
         return {"score": 0.0, "band": "Low", "breakdown": {}}
     dom = k.get("dominant", "INR")
@@ -98,17 +103,19 @@ def compute_risk(k):
     v = df.groupby("VENDOR")["AMOUNT_NUM"].sum() if "VENDOR" in df.columns else pd.Series(dtype=float)
     nv = len(v) if not v.empty else 0
     top_share = float(v.max()) / total if not v.empty else 1.0
-    v_conc, v_div = (1-top_share)*100, min(100, (nv/50)*100)
-    c_expo = (totals.get(dom,0)/total)*100 if total else 100
+    v_conc = (1 - top_share) * 100.0
+    v_div = min(100.0, (nv / 50.0) * 100.0) if nv > 0 else 0.0
+    c_expo = (totals.get(dom, 0.0) / total) * 100.0 if total else 100.0
     mvals = list(k.get("monthly", {}).values())
-    m_vol = 100*(1 - np.std(mvals)/(np.mean(mvals)+1e-9)) if len(mvals)>2 else 80
-    score = np.clip((v_conc+v_div+c_expo+m_vol)/4, 0, 100)
-    band = "Low" if score>=67 else "Medium" if score>=34 else "High"
-    return {"score": score, "band": band,
-            "breakdown": {"Vendor Concentration": v_conc, "Vendor Diversity": v_div,
-                          "Currency Exposure": c_expo, "Monthly Volatility": m_vol}}
+    m_vol = 100.0 * (1 - np.std(mvals) / (np.mean(mvals) + 1e-9)) if len(mvals) > 2 and np.mean(mvals) != 0 else 80.0
+    score = float(np.clip((v_conc + v_div + c_expo + m_vol) / 4.0, 0.0, 100.0))
+    band = "Low" if score >= 67 else ("Medium" if score >= 34 else "High")
+    return {"score": score, "band": band, "breakdown": {
+        "Vendor Concentration": v_conc, "Vendor Diversity": v_div,
+        "Currency Exposure": c_expo, "Monthly Volatility": m_vol
+    }}
 
-def compute_efficiency_summary(df):
+def compute_efficiency_summary(df: pd.DataFrame):
     if "VENDOR" not in df.columns or df.empty:
         return {}
     avg_cost = df.groupby("VENDOR")["AMOUNT_NUM"].mean()
@@ -121,13 +128,13 @@ def compute_efficiency_summary(df):
         eff[v] = {"avg_cost": ac, "total_spend": ts, "units_est": units}
     return eff
 
-def compute_material_performance(df):
+def compute_material_performance(df: pd.DataFrame):
     if "MATERIAL" not in df.columns or df.empty:
         return {}
     return df.groupby("MATERIAL")["AMOUNT_NUM"].sum().sort_values(ascending=False).to_dict()
 
-# ---------- EXECUTIVE SUMMARY ----------
-def generate_ai_text(k):
+# ---------- EXECUTIVE SUMMARY text generator ----------
+def generate_ai_text(k: dict):
     total = k.get("total_spend", 0.0)
     currency = k.get("dominant", "INR")
     top_v = list(k.get("top_v", {}).keys())[:3]
@@ -136,7 +143,7 @@ def generate_ai_text(k):
     if len(totals) > 1:
         other = [c for c in totals.keys() if c != currency]
         exposure = sum(v for c, v in totals.items() if c != currency)
-        exposure_pct = (exposure / (total + 1e-9)) * 100
+        exposure_pct = (exposure / (total + 1e-9)) * 100.0
         exposure_text = f" with {exposure_pct:.1f}% exposure in {', '.join(other[:3])}"
     else:
         exposure_text = ""
@@ -144,77 +151,103 @@ def generate_ai_text(k):
             f"Top vendors by spend: {top_v_text}. "
             f"Overall procurement performance indicates opportunities in vendor optimization and currency risk management.")
 
-# ---------- INSIGHTS ----------
-def spend_trend_insight(monthly):
-    if not monthly:
-        return "Spend trend: Not enough monthly data."
-    months = sorted(monthly.keys())
-    if len(months) < 2:
-        return "Spend trend: Insufficient data."
-    last, prev = monthly[months[-1]], monthly[months[-2]]
-    pct = ((last - prev) / (prev + 1e-9)) * 100
-    direction = "up" if pct > 0 else "down" if pct < 0 else "flat"
-    return f"Spend trend: {direction} {abs(pct):.1f}% vs prior month."
-
-def vendor_dependency_insight(top_v, total):
-    if not top_v or total == 0:
-        return "Vendor dependency: Insufficient data."
-    pct = sum(list(top_v.values())[:3]) / (total + 1e-9) * 100
-    return f"Vendor dependency: Top 3 vendors account for {pct:.1f}% of total spend."
-
-def currency_exposure_insight(totals):
+# ---------- EXTENDED INSIGHTS (Option B - 3-4 sentences each) ----------
+def currency_exposure_insight_extended(totals: dict):
     if not totals:
-        return "Currency exposure: No data."
+        return ("Currency exposure: No currency data available. Ensure currency column present in dataset "
+                "for multi-currency analysis.")
     total = sum(totals.values())
-    sorted_c = sorted(totals.items(), key=lambda x: x[1], reverse=True)
-    dom, dom_val = sorted_c[0]
-    others = [(c, v) for c, v in sorted_c[1:]]
-    if not others:
-        return f"Currency exposure: Fully in {dom}."
-    other_pct = sum(v for _, v in others) / (total + 1e-9) * 100
-    return f"Currency exposure: {dom} dominant ({dom_val/total*100:.1f}%), {other_pct:.1f}% across {', '.join(c for c,_ in others[:3])}."
+    items = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    lines = []
+    # top currencies and % shares
+    lines.append("Currency Exposure — Multi-currency distribution and risk assessment:")
+    for cur, amt in items[:4]:
+        lines.append(f"- {cur}: {amt:,.0f} ({amt/total*100:.1f}%)")
+    # risk summary
+    dominant = items[0][0]
+    exposure_others = 100.0 - (items[0][1] / (total + 1e-9) * 100.0)
+    risk_note = ("High exposure to multiple currencies increases FX risk; consider hedging or invoicing strategies."
+                 if exposure_others > 20 else "Currency exposure appears concentrated; monitor FX rates.")
+    lines.append(risk_note)
+    return " ".join(lines)
 
-def efficiency_insight(eff):
-    if not eff:
-        return "Efficiency: No data."
-    sorted_v = sorted(eff.items(), key=lambda x: x[1]["avg_cost"])
-    best, worst = sorted_v[0], sorted_v[-1]
-    units, gap = worst[1]["units_est"], worst[1]["avg_cost"] - best[1]["avg_cost"]
-    est_savings = units * gap if units > 0 and gap > 0 else 0
-    return (f"Efficiency: Best {best[0]} ({best[1]['avg_cost']:.2f} cost/unit). "
-            f"Worst {worst[0]} ({worst[1]['avg_cost']:.2f}); potential savings {est_savings:,.0f} (vendor currency).")
-
-def material_mix_insight(mat, total):
-    if not mat or total == 0:
-        return "Material mix: Not enough data."
-    items = list(mat.items())[:2]
-    parts = [f"{m} ({v/total*100:.1f}%)" for m, v in items]
-    return "Material mix: " + ", ".join(parts) + "."
-
-def current_month_snapshot(monthly, top_v):
+def monthly_quarterly_trend_insight_extended(monthly: dict):
     if not monthly:
-        return "Current month: No data."
+        return ("Monthly/Quarterly Spend Trends: Not enough time-series data. Provide PO_DATE for time analysis.")
     months = sorted(monthly.keys())
-    last = months[-1]
-    prev_val = monthly[months[-2]] if len(months) >= 2 else None
-    last_val = monthly[last]
-    pct = ((last_val - prev_val) / (prev_val + 1e-9) * 100) if prev_val else 0
-    trend = "up" if pct > 0 else "down" if pct < 0 else "flat"
-    top_vendor = list(top_v.keys())[0] if top_v else "N/A"
-    return f"Current month ({last}): {last_val:,.0f}; top vendor {top_vendor}; trend {trend} {abs(pct):.1f}%."
+    last_6 = months[-6:] if len(months) >= 6 else months
+    vals = [monthly[m] for m in last_6]
+    # trend slope
+    x = np.arange(len(vals))
+    if len(vals) >= 2:
+        coef = np.polyfit(x, vals, 1)[0]
+        trend = "increasing" if coef > 0 else "decreasing" if coef < 0 else "flat"
+    else:
+        trend = "flat"
+    # seasonal detection: compare quarters (if enough months)
+    q_note = ""
+    if len(monthly) >= 12:
+        # aggregate quarters
+        ser = pd.Series(monthly)
+        ser.index = pd.to_datetime([m + "-01" for m in ser.index], errors="coerce")
+        q = ser.resample("Q").sum()
+        recent_q = q[-4:]
+        q_std = recent_q.std()
+        if q_std > recent_q.mean() * 0.2:
+            q_note = " Seasonal pattern detected across quarters."
+    lines = [
+        f"Monthly/Quarterly Spend Trends: Recent trend is {trend}.",
+        f"Last {len(last_6)} months analysed; observe month-to-month variability.",
+        q_note
+    ]
+    return " ".join([l for l in lines if l])
 
-# ---------- PDF CLASS ----------
+def material_spend_insight_extended(mat_perf: dict, total: float):
+    if not mat_perf:
+        return ("Material Spend: No material category data. Ensure 'MATERIAL' and 'AMOUNT' columns exist.")
+    top = list(mat_perf.items())[:5]
+    parts = [f"{m} ({v/total*100:.1f}%)" for m, v in top[:3]]
+    dominance_note = ("Top categories dominate spend; consider category sourcing strategies."
+                      if sum(v for _, v in top[:3]) / (total + 1e-9) > 0.5 else "Material spend is relatively diversified.")
+    return ("Material Spend: Top categories include " + ", ".join(parts) + ". " + dominance_note)
+
+def supplier_relationship_insight_extended(top_v: dict, total: float):
+    if not top_v:
+        return ("Supplier Relationship Management: No vendor data available.")
+    top3 = list(top_v.items())[:3]
+    pct = sum(v for _, v in top3) / (total + 1e-9) * 100.0
+    lines = [
+        f"Supplier Relationship Management: Top 3 vendors contribute {pct:.1f}% of total spend.",
+        "High concentration indicates negotiation leverage but also supplier dependency risk.",
+        "Recommend strategic supplier segmentation, performance SLAs, and contingency sourcing."
+    ]
+    return " ".join(lines)
+
+# ---------- EFFICIENCY INSIGHT (existing style) ----------
+def efficiency_insight_summary(eff_summary: dict):
+    if not eff_summary:
+        return "Efficiency: insufficient data."
+    sorted_v = sorted(eff_summary.items(), key=lambda x: x[1]["avg_cost"])
+    best, worst = sorted_v[0], sorted_v[-1]
+    units = worst[1]["units_est"]
+    gap = worst[1]["avg_cost"] - best[1]["avg_cost"]
+    est_savings = units * gap if units > 0 and gap > 0 else 0.0
+    return (f"Efficiency: Most Efficient: {best[0]} at {best[1]['avg_cost']:.2f} cost/unit. "
+            f"Least Efficient: {worst[0]} at {worst[1]['avg_cost']:.2f} cost/unit; "
+            f"estimated annual savings if optimized: {est_savings:,.0f} (vendor currency).")
+
+# ---------- PDF Class ----------
 class PDF(FPDF):
     def header(self):
         if os.path.exists(LOGO_PATH):
             self.image(LOGO_PATH, 10, 8, 20)
         self.set_xy(32, 10)
         self.set_font("Helvetica", "B", 12)
-        self.set_text_color(25, 50, 125)
+        self.set_text_color(*BRAND_BLUE)
         self.cell(0, 6, "SAP Automatz", ln=True)
         self.set_xy(32, 16)
         self.set_font("Helvetica", "I", 9)
-        self.set_text_color(60, 60, 60)
+        self.set_text_color(80, 80, 80)
         self.cell(0, 5, TAGLINE, ln=True)
         self.ln(8)
         self.line(10, 25, 200, 25)
@@ -225,126 +258,185 @@ class PDF(FPDF):
         self.set_text_color(100, 100, 100)
         self.cell(0, 10, f"SAP Automatz | Page {self.page_no()}", 0, 0, "C")
 
-# ---------- CHARTS ----------
-def generate_dashboard_charts(k, risk):
+# ---------- CHARTS (now includes material pie) ----------
+def generate_dashboard_charts(k: dict, risk: dict):
     charts = []
+    # Monthly trend
     try:
         if k.get("monthly"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                plt.figure(figsize=(7,3))
+                plt.figure(figsize=(8, 3.6))
                 months, vals = list(k["monthly"].keys()), list(k["monthly"].values())
-                plt.plot(months, vals, marker="o")
+                plt.plot(months, vals, marker="o", linewidth=1.5)
                 plt.title("Monthly Spend Trend")
                 plt.xticks(rotation=45, ha="right")
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
                 charts.append(tmp.name)
                 plt.close()
-    except Exception: plt.close()
+    except Exception:
+        plt.close()
+    # top vendors
     try:
         if k.get("top_v"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
                 top5 = dict(list(k["top_v"].items())[:5])
-                plt.figure(figsize=(7,3))
-                plt.bar(top5.keys(), top5.values())
-                plt.title("Top 5 Vendors")
+                plt.figure(figsize=(8, 3.6))
+                plt.bar(range(len(top5)), list(top5.values()), tick_label=list(top5.keys()))
+                plt.title("Top 5 Vendors by Spend")
                 plt.xticks(rotation=45, ha="right")
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
                 charts.append(tmp.name)
                 plt.close()
-    except Exception: plt.close()
+    except Exception:
+        plt.close()
+    # risk breakdown
     try:
         if risk.get("breakdown"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                plt.figure(figsize=(7,3))
-                plt.bar(risk["breakdown"].keys(), risk["breakdown"].values())
+                keys, vals = zip(*list(risk["breakdown"].items()))
+                plt.figure(figsize=(8, 3.6))
+                plt.bar(range(len(vals)), vals, tick_label=keys)
                 plt.title("Risk Breakdown")
                 plt.xticks(rotation=30, ha="right")
                 plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
                 charts.append(tmp.name)
                 plt.close()
-    except Exception: plt.close()
+    except Exception:
+        plt.close()
+    # material pie chart (top 10 materials)
+    try:
+        mat = k.get("top_m", {})
+        if mat:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                items = list(mat.items())[:10]
+                labels = [i[0] for i in items]
+                sizes = [i[1] for i in items]
+                plt.figure(figsize=(6.5, 4))
+                plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=140)
+                plt.title("Material Spend Distribution (Top 10)")
+                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
+                charts.append(tmp.name)
+                plt.close()
+    except Exception:
+        plt.close()
     return charts
 
-# ---------- PDF GENERATOR ----------
-def generate_pdf(ai_text, insights, k, risk, charts, company):
+# ---------- PDF generator (dashboards start on new page) ----------
+def generate_pdf(ai_text: str, insights: list, k: dict, risk: dict, charts: list, company: str):
     pdf = PDF(); pdf.alias_nb_pages(); pdf.add_page()
-    pdf.set_font("Helvetica", "B", 20); pdf.set_text_color(25, 50, 125)
+    pdf.set_font("Helvetica", "B", 20); pdf.set_text_color(*BRAND_BLUE)
     pdf.cell(0, 15, "Procurement Analytics Report", ln=True, align="C")
-    pdf.ln(8)
+    pdf.ln(6)
     pdf.set_font("Helvetica", "", 12); pdf.set_text_color(0, 0, 0)
     pdf.cell(0, 8, f"Company: {company}", ln=True, align="C")
     pdf.cell(0, 8, f"Generated On: {datetime.date.today():%d-%b-%Y}", ln=True, align="C")
-    pdf.ln(6); pdf.set_font("Helvetica", "I", 9)
-    pdf.cell(0, 6, AI_TAGLINE, ln=True)
+    pdf.ln(6); pdf.set_font("Helvetica", "I", 9); pdf.cell(0, 6, AI_TAGLINE, ln=True)
+    pdf.ln(8)
+
+    # Procurement Insights (extended)
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, "Procurement Insights (Expanded)", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    for ins in insights:
+        pdf.multi_cell(0, 7, ins)
     pdf.ln(6)
 
-    # Procurement Insights
-    pdf.set_text_color(25, 50, 125); pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, "Procurement Insights Summary", ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-    for ins in insights: pdf.multi_cell(0, 7, ins)
-    pdf.ln(4)
+    # Executive summary
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Executive Summary", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12); pdf.multi_cell(0, 7, ai_text)
+    pdf.ln(6)
 
-    # Executive Summary
-    pdf.set_text_color(25, 50, 125); pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, "Executive Summary", ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-    pdf.multi_cell(0, 7, ai_text); pdf.ln(4)
-
-    # Key Metrics
-    pdf.set_text_color(25, 50, 125); pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, "Key Performance Metrics", ln=True)
+    # Key Performance Metrics
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Key Performance Metrics", ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
     metrics = [
         f"Total Spend: {k['total_spend']:,.2f} {k['dominant']}",
         f"Records: {k['records']}",
-        f"Vendors: {len(k['top_v'])}",
-        f"Materials: {len(k['top_m'])}",
+        f"Vendors (Top shown): {len(k['top_v'])}",
+        f"Materials (Top shown): {len(k['top_m'])}",
         f"Risk Score: {risk['score']:.1f} ({risk['band']})"
     ]
     for m in metrics: pdf.cell(0, 7, "- " + m, ln=True)
-    pdf.ln(4)
+    pdf.ln(6)
 
-    # Dashboard Charts (new fixed spacing)
-    if charts:
-        pdf.set_text_color(25, 50, 125); pdf.set_font("Helvetica", "B", 14)
-        pdf.cell(0, 8, "Dashboard Charts", ln=True)
-        pdf.set_text_color(0, 0, 0)
-        captions = ["Spend Trend", "Top Vendors", "Risk Breakdown"]
-        for idx, ch in enumerate(charts):
-            if pdf.get_y() > 210:
-                pdf.add_page()
+    # Critical Findings
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Critical Findings", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    pdf.multi_cell(0, 7, "Top vendor concentration and multi-currency exposure create areas for negotiated savings and FX risk management. Investigate supplier consolidation and hedging strategies.")
+    pdf.ln(6)
+
+    # Top Performing Vendors
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Top Performing Vendors", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    for v, amt in k.get("top_v", {}).items():
+        pdf.cell(0, 7, f"- {v}: {amt:,.2f} {k['dominant']}", ln=True)
+    pdf.ln(6)
+
+    # Efficiency Analysis (narrative)
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Efficiency Analysis", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    eff = compute_efficiency_summary(k["df"])
+    if eff:
+        sorted_eff = sorted(eff.items(), key=lambda x: x[1]["avg_cost"])
+        best, worst = sorted_eff[0], sorted_eff[-1]
+        units = worst[1]["units_est"]
+        gap = worst[1]["avg_cost"] - best[1]["avg_cost"]
+        est_savings = units * gap if units > 0 and gap > 0 else 0.0
+        pdf.multi_cell(0, 7, f"Most Efficient: {best[0]} leads with {best[1]['avg_cost']:.2f} cost-per-unit despite {best[1]['total_spend']:,.0f} total spend, representing the efficiency benchmark.")
+        pdf.multi_cell(0, 7, f"Least Efficient: {worst[0]} shows {worst[1]['avg_cost']:.2f} cost-per-unit, presenting the largest optimization opportunity with potential savings of {est_savings:,.0f} (vendor currency).")
+    else:
+        pdf.multi_cell(0, 7, "Efficiency details unavailable.")
+    pdf.ln(6)
+
+    # Material Category Performance
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Material Category Performance", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    mat = compute_material_performance(k["df"])
+    if mat:
+        for m, v in list(mat.items())[:10]:
+            pdf.cell(0, 7, f"- {m}: {v:,.2f} {k['dominant']}", ln=True)
+    else:
+        pdf.multi_cell(0, 7, "No material performance data available.")
+    pdf.ln(8)
+
+    # DASHBOARD CHARTS - START ON NEW PAGE
+    pdf.add_page()
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Dashboard Charts", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.ln(4)
+    captions = ["Monthly Spend Trend", "Top Vendors (Bar)", "Risk Breakdown", "Material Spend Distribution"]
+    for idx, ch in enumerate(charts):
+        # ensure enough vertical space, otherwise new page
+        if pdf.get_y() > 200:
+            pdf.add_page()
+        try:
             y = pdf.get_y() + 6
             pdf.image(ch, x=20, y=y, w=170)
-            pdf.ln(95)
+            pdf.ln(98)
             pdf.set_font("Helvetica", "I", 10)
-            pdf.set_text_color(60, 60, 120)
-            pdf.cell(0, 6, f"Figure {idx+1}: {captions[idx]}", ln=True, align="C")
-            pdf.set_text_color(0, 0, 0)
-            pdf.set_font("Helvetica", "", 12)
-            pdf.ln(4)
+            pdf.set_text_color(80, 80, 120)
+            cap = captions[idx] if idx < len(captions) else f"Figure {idx+1}"
+            pdf.cell(0, 6, f"Figure {idx+1}: {cap}", ln=True, align="C")
+            pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+            pdf.ln(6)
+        except Exception:
+            continue
 
-        # Risk Summary
-    pdf.set_text_color(25, 50, 125)
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, "Risk Summary", ln=True)
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_font("Helvetica", "", 12)
+    # Risk Summary
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Risk Summary", ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
     pdf.cell(0, 7, f"Risk Score: {risk['score']:.1f} ({risk['band']})", ln=True)
     for k_, v_ in risk.get("breakdown", {}).items():
         pdf.cell(0, 7, f"- {k_}: {v_:.1f}", ln=True)
     pdf.ln(8)
 
-    # AI tag at the end
+    # AI tagline at end
     pdf.set_font("Helvetica", "I", 9)
     pdf.set_text_color(100, 100, 100)
     pdf.cell(0, 6, AI_TAGLINE, ln=True)
 
-    # Final output
     out = io.BytesIO(pdf.output(dest="S").encode("latin-1", "ignore"))
     out.seek(0)
     return out
-
 
 # ---------- APP FLOW ----------
 st.subheader("🔐 Verify Access Key")
@@ -371,28 +463,33 @@ if not file:
 company = st.text_input("Enter Company Name", "ABC Manufacturing Pvt Ltd")
 
 try:
-    # Read file
-    df = pd.read_excel(file) if file.name.lower().endswith(".xlsx") else pd.read_csv(file)
+    # read file
+    if file.name.lower().endswith(".xlsx"):
+        df = pd.read_excel(file)
+    else:
+        df = pd.read_csv(file)
+
     k = compute_kpis(df)
     risk = compute_risk(k)
     ai_text = generate_ai_text(k)
 
-    # Compute insights
-    insights = [
-        spend_trend_insight(k.get("monthly", {})),
-        vendor_dependency_insight(k.get("top_v", {}), k.get("total_spend", 0.0)),
-        currency_exposure_insight(k.get("totals", {})),
-        efficiency_insight(compute_efficiency_summary(k["df"])),
-        material_mix_insight(k.get("top_m", {}), k.get("total_spend", 0.0)),
-        current_month_snapshot(k.get("monthly", {}), k.get("top_v", {}))
-    ]
+    # create extended insights
+    insights = []
+    insights.append(currency_exposure_insight_extended(k.get("totals", {})))
+    insights.append(monthly_quarterly_trend_insight_extended(k.get("monthly", {})))
+    insights.append(material_spend_insight_extended(k.get("top_m", {}), k.get("total_spend", 0.0)))
+    insights.append(supplier_relationship_insight_extended(k.get("top_v", {}), k.get("total_spend", 0.0)))
+    eff_summary = compute_efficiency_summary(k["df"])
+    insights.append(efficiency_insight_summary(eff_summary))
+    insights.append(current_month_snapshot(k.get("monthly", {}), k.get("top_v", {})))
 
-    # On-screen display
-    st.markdown("## Procurement Insights Summary")
+    # On-screen: Insights (expanded)
+    st.markdown("## Procurement Insights (Expanded)")
     for ins in insights:
-        st.write("- " + ins)
+        st.write(ins)
     st.caption(AI_TAGLINE)
 
+    # Executive summary & metrics
     st.markdown("## Executive Summary")
     st.write(ai_text)
 
@@ -409,10 +506,37 @@ try:
     for c, label, val in zip(cols, labels, metrics_vals):
         c.metric(label, str(val))
 
+    # Efficiency on-screen
+    st.markdown("### Efficiency Analysis")
+    if eff_summary:
+        sorted_eff = sorted(eff_summary.items(), key=lambda x: x[1]["avg_cost"])
+        best, worst = sorted_eff[0], sorted_eff[-1]
+        units = worst[1]["units_est"]
+        gap = worst[1]["avg_cost"] - best[1]["avg_cost"]
+        est_savings = units * gap if units > 0 and gap > 0 else 0.0
+        st.write(f"**Most Efficient:** {best[0]} — {best[1]['avg_cost']:.2f} cost/unit; total spend {best[1]['total_spend']:,.0f}.")
+        st.write(f"**Least Efficient:** {worst[0]} — {worst[1]['avg_cost']:.2f} cost/unit; estimated annual savings ≈ {est_savings:,.0f} (vendor currency).")
+    else:
+        st.write("Efficiency data not available.")
+
+    # Material performance on-screen
+    st.markdown("### Material Category Performance")
+    mat_perf = compute_material_performance(k["df"])
+    if mat_perf:
+        st.dataframe(pd.DataFrame.from_dict(mat_perf, orient="index", columns=["Spend"]).sort_values("Spend", ascending=False).head(10))
+    else:
+        st.write("No material performance data available.")
+
+    # Charts
     st.markdown("### Dashboard Charts")
     charts = generate_dashboard_charts(k, risk)
     if charts:
-        st.image(charts, caption=["Spend Trend", "Top Vendors", "Risk Breakdown"], use_container_width=True)
+        captions = []
+        if k.get("monthly"): captions.append("Monthly Spend Trend")
+        if k.get("top_v"): captions.append("Top Vendors")
+        if risk.get("breakdown"): captions.append("Risk Breakdown")
+        if k.get("top_m"): captions.append("Material Spend Distribution")
+        st.image(charts, caption=captions, use_container_width=True)
     else:
         st.info("Not enough data to generate charts.")
     st.caption(AI_TAGLINE)
@@ -420,16 +544,9 @@ try:
     # PDF generation
     if st.button("📄 Generate PDF Report"):
         pdf_buf = generate_pdf(ai_text, insights, k, risk, charts, company)
-        safe_name = company.strip().replace(" ", "_") or "Company"
-        st.download_button(
-            "Download Report",
-            pdf_buf,
-            file_name=f"{safe_name}_Procurement_Report.pdf",
-            mime="application/pdf",
-        )
+        safe_name = (company.strip().replace(" ", "_") or "Company")
+        st.download_button("Download Report", pdf_buf, file_name=f"{safe_name}_Procurement_Report.pdf", mime="application/pdf")
 
 except Exception:
     st.error("Error generating report:")
     st.text(traceback.format_exc())
-
-
