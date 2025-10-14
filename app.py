@@ -1,8 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v24
-# Fixes:
-#  - currency_exposure_insight_extended: correct single-currency wording
-#  - vendor performance PDF table header and column widths to avoid header wrap/garbage
+# SAP Automatz – Procurement Analytics v25
+# Fix: shortened vendor table header "Avg Inv Lag (d)" and adjusted column widths to avoid wrap/garbage
 
 import os
 import io
@@ -497,7 +495,6 @@ def _pdf_table_row(pdf, row_cells, col_widths, font_size=9, alignments=None):
     sanitized = [sanitize_for_pdf(str(x)) for x in row_cells]
     est_lines = []
     for text, w in zip(sanitized, col_widths):
-        # heuristic: approx characters per line depends on width
         chars_per_line = max(10, int(w * 2.8))
         lines = int(np.ceil(len(text) / max(1, chars_per_line)))
         est_lines.append(lines)
@@ -512,7 +509,6 @@ def _pdf_table_row(pdf, row_cells, col_widths, font_size=9, alignments=None):
         align = alignments[i] if i < len(alignments) else 'L'
         x = pdf.get_x()
         y = pdf.get_y()
-        # Use multi_cell to allow wrapping
         pdf.multi_cell(w, line_h, text, border=1, align=align)
         pdf.set_xy(x + w, y)
     pdf.ln(cell_h)
@@ -569,9 +565,10 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
     if not vendor_perf_df.empty:
         vdf = vendor_perf_df.copy().head(10)
-        headers = ["Vendor", "PO Qty", "GR Qty", "Fulfill %", "On-time %", "Avg Inv Lag (days)", "Total Spend"]
-        # adjusted column widths to avoid wrapping garbage
-        col_w = [60, 18, 18, 20, 18, 26, 26]  # sum ~186 (fits page with margins)
+        # Shorter header label for Avg Inv Lag to avoid wrap/garbage
+        headers = ["Vendor", "PO Qty", "GR Qty", "Fulfill %", "On-time %", "Avg Inv Lag (d)", "Total Spend"]
+        # adjusted column widths to avoid wrapping garbage (Avg Inv Lag column widened)
+        col_w = [60, 18, 18, 20, 18, 30, 22]  # sum approx fits page margins
         pdf.set_font("Helvetica", "B", 9)
         _pdf_table_row(pdf, [sanitize_for_pdf(h) for h in headers], col_w, font_size=9, alignments=['L','R','R','R','R','R','R'])
         pdf.set_font("Helvetica", "", 9)
