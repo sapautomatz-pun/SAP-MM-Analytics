@@ -225,6 +225,23 @@ def supplier_relationship_insight_extended(top_v: dict, total: float):
 
 # ---------- EFFICIENCY INSIGHT (existing style) ----------
 def efficiency_insight_summary(eff_summary: dict):
+def current_month_snapshot(monthly, top_v):
+    """Generates short summary comparing current month spend to prior month."""
+    if not monthly:
+        return "Current Month Snapshot: No monthly data available."
+    months = sorted(monthly.keys())
+    last = months[-1]
+    last_val = monthly[last]
+    if len(months) >= 2:
+        prev_val = monthly[months[-2]]
+        pct_change = ((last_val - prev_val) / (prev_val + 1e-9)) * 100
+        trend = "increased" if pct_change > 0 else "decreased" if pct_change < 0 else "remained stable"
+        top_vendor = list(top_v.keys())[0] if top_v else "N/A"
+        return (f"Current Month Snapshot: Spend in {last} was {last_val:,.0f}, "
+                f"which {trend} by {abs(pct_change):.1f}% from the prior month. "
+                f"Top vendor for the period was {top_vendor}.")
+    else:
+        return f"Current Month Snapshot: Spend in {last} was {last_val:,.0f} (insufficient prior data for comparison)."
     if not eff_summary:
         return "Efficiency: insufficient data."
     sorted_v = sorted(eff_summary.items(), key=lambda x: x[1]["avg_cost"])
@@ -550,3 +567,4 @@ try:
 except Exception:
     st.error("Error generating report:")
     st.text(traceback.format_exc())
+
