@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v17
-# Fixes: PDF unicode encoding errors (sanitize text) + ensures charts show on screen
+# SAP Automatz – Procurement Analytics v18
+# Fix: prevents PDF section overlap by ensuring page space before sections/images
 
 import os
 import io
@@ -44,18 +44,12 @@ st.session_state.setdefault("verified", False)
 
 # ---------- UTIL: sanitize text for PDF ----------
 def sanitize_for_pdf(s: str) -> str:
-    """Return a PDF-safe (latin-1-friendly) plain-ASCII string.
-    Attempts to transliterate Unicode to ASCII; removes characters not representable."""
     if s is None:
         return ""
-    # convert to str
     s = str(s)
-    # replace common unicode punctuation with ascii equivalents
     s = s.replace("–", "-").replace("—", "-").replace("•", "-").replace("“", '"').replace("”", '"').replace("’", "'")
-    # normalize and drop diacritics, then encode ascii ignoring anything left non-ascii
     s_norm = unicodedata.normalize("NFKD", s)
     s_ascii = s_norm.encode("ascii", "ignore").decode("ascii")
-    # collapse repeated whitespace
     s_ascii = re.sub(r"\s+", " ", s_ascii).strip()
     return s_ascii
 
@@ -79,7 +73,6 @@ def parse_amount_and_currency(value, fallback="INR"):
 def prepare_dataframe(df: pd.DataFrame):
     df = df.copy()
     df.columns = [c.strip().upper() for c in df.columns]
-    # detect amount-like column if absent
     if "AMOUNT" not in df.columns:
         for c in df.columns:
             if "AMT" in c.upper():
@@ -180,7 +173,7 @@ def currency_exposure_insight_extended(totals: dict):
     parts = [f"{cur}: {amt:,.0f} ({amt/total*100:.1f}%)" for cur, amt in items[:4]]
     exposure_others = 100.0 - (items[0][1] / (total + 1e-9) * 100.0)
     risk_note = "High exposure to multiple currencies increases FX risk; consider hedging or invoicing strategies." if exposure_others > 20 else "Currency exposure appears concentrated; monitor FX rates."
-    return "Currency Exposure — Multi-currency distribution and risk assessment: " + "; ".join(parts) + ". " + risk_note
+    return "Currency Exposure — Multi-currency spend distribution with risk assessment: " + "; ".join(parts) + ". " + risk_note
 
 def monthly_quarterly_trend_insight_extended(monthly: dict):
     if not monthly:
@@ -262,7 +255,6 @@ class PDF(FPDF):
 # ---------- CHARTS ----------
 def generate_dashboard_charts(k: dict, risk: dict):
     charts = []
-    # Monthly trend
     try:
         if k.get("monthly"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -271,12 +263,9 @@ def generate_dashboard_charts(k: dict, risk: dict):
                 plt.plot(months, vals, marker="o", linewidth=1.5)
                 plt.title("Monthly Spend Trend")
                 plt.xticks(rotation=45, ha="right")
-                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
-                charts.append(tmp.name)
-                plt.close()
+                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Top vendors
     try:
         if k.get("top_v"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -285,12 +274,9 @@ def generate_dashboard_charts(k: dict, risk: dict):
                 plt.bar(range(len(top5)), list(top5.values()), tick_label=list(top5.keys()))
                 plt.title("Top 5 Vendors by Spend")
                 plt.xticks(rotation=45, ha="right")
-                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
-                charts.append(tmp.name)
-                plt.close()
+                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Risk breakdown
     try:
         if risk.get("breakdown"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -299,12 +285,9 @@ def generate_dashboard_charts(k: dict, risk: dict):
                 plt.bar(range(len(vals)), vals, tick_label=keys)
                 plt.title("Risk Breakdown")
                 plt.xticks(rotation=30, ha="right")
-                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
-                charts.append(tmp.name)
-                plt.close()
+                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
-    # Material pie
     try:
         mat = k.get("top_m", {})
         if mat:
@@ -315,18 +298,27 @@ def generate_dashboard_charts(k: dict, risk: dict):
                 plt.figure(figsize=(6.5, 4))
                 plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=140)
                 plt.title("Material Spend Distribution (Top 10)")
-                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight")
-                charts.append(tmp.name)
-                plt.close()
+                plt.tight_layout(); plt.savefig(tmp.name, bbox_inches="tight"); charts.append(tmp.name); plt.close()
     except Exception:
         plt.close()
     return charts
 
-# ---------- PDF Generator (sanitize every text) ----------
+# ---------- PDF generate helper: ensure space ----------
+def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
+    """Ensure there is needed_height_mm space left on the current page; if not, add a new page."""
+    try:
+        bottom_limit = pdf_obj.h - pdf_obj.b_margin
+    except Exception:
+        # fallback conservative limit
+        bottom_limit = 280
+    if pdf_obj.get_y() + needed_height_mm > bottom_limit:
+        pdf_obj.add_page()
+
+# ---------- PDF Generator ----------
 def generate_pdf(ai_text, insights, k, risk, charts, company):
     pdf = PDF(); pdf.alias_nb_pages(); pdf.add_page()
 
-    # header info (sanitize)
+    # Header block
     pdf.set_font("Helvetica", "B", 20); pdf.set_text_color(*BRAND_BLUE)
     pdf.cell(0, 15, sanitize_for_pdf("Procurement Analytics Report"), ln=True, align="C")
     pdf.ln(6)
@@ -336,25 +328,25 @@ def generate_pdf(ai_text, insights, k, risk, charts, company):
     pdf.ln(6); pdf.set_font("Helvetica", "I", 9); pdf.cell(0, 6, sanitize_for_pdf(AI_TAGLINE), ln=True)
     pdf.ln(8)
 
-    # Insights (sanitized)
+    # Insights - ensure space for block of text (approx height)
+    ensure_pdf_space(pdf, 40 + len(insights) * 7)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Procurement Insights (Expanded)"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
     for ins in insights:
+        ensure_pdf_space(pdf, 10)
         pdf.multi_cell(0, 7, sanitize_for_pdf(ins))
     pdf.ln(6)
 
     # Executive summary
+    ensure_pdf_space(pdf, 40)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Executive Summary"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
     pdf.multi_cell(0, 7, sanitize_for_pdf(ai_text))
     pdf.ln(6)
 
-    # Key metrics
-    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, sanitize_for_pdf("Key Performance Metrics"), ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+    # Key Performance Metrics - compute needed height dynamically
     metrics = [
         f"Total Spend: {k['total_spend']:,.2f} {k['dominant']}",
         f"Records: {k['records']}",
@@ -362,11 +354,18 @@ def generate_pdf(ai_text, insights, k, risk, charts, company):
         f"Materials (Top shown): {len(k['top_m'])}",
         f"Risk Score: {risk['score']:.1f} ({risk['band']})"
     ]
+    needed = 12 + len(metrics) * 7
+    ensure_pdf_space(pdf, needed)
+    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, sanitize_for_pdf("Key Performance Metrics"), ln=True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
     for m in metrics:
+        ensure_pdf_space(pdf, 8)
         pdf.cell(0, 7, "- " + sanitize_for_pdf(m), ln=True)
     pdf.ln(6)
 
-    # Critical findings
+    # Critical Findings
+    ensure_pdf_space(pdf, 30)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Critical Findings"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
@@ -374,19 +373,28 @@ def generate_pdf(ai_text, insights, k, risk, charts, company):
     pdf.multi_cell(0, 7, sanitize_for_pdf(cf))
     pdf.ln(6)
 
-    # Top vendors
+    # Top Performing Vendors
+    topv = k.get("top_v", {})
+    needed = 12 + max(1, len(topv)) * 7
+    ensure_pdf_space(pdf, needed)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Top Performing Vendors"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-    for v, amt in k.get("top_v", {}).items():
-        pdf.cell(0, 7, "- " + sanitize_for_pdf(f"{v}: {amt:,.2f} {k['dominant']}"), ln=True)
+    if topv:
+        for v, amt in topv.items():
+            ensure_pdf_space(pdf, 8)
+            pdf.cell(0, 7, "- " + sanitize_for_pdf(f"{v}: {amt:,.2f} {k['dominant']}"), ln=True)
+    else:
+        pdf.multi_cell(0, 7, sanitize_for_pdf("No vendor data available."))
     pdf.ln(6)
 
-    # Efficiency analysis
+    # Efficiency Analysis
+    eff = compute_efficiency_summary(k["df"])
+    needed = 12 + (2 * 7 if eff else 1 * 7)
+    ensure_pdf_space(pdf, needed)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Efficiency Analysis"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-    eff = compute_efficiency_summary(k["df"])
     if eff:
         sorted_eff = sorted(eff.items(), key=lambda x: x[1]["avg_cost"])
         best, worst = sorted_eff[0], sorted_eff[-1]
@@ -394,64 +402,71 @@ def generate_pdf(ai_text, insights, k, risk, charts, company):
         gap = worst[1]["avg_cost"] - best[1]["avg_cost"]
         est_savings = units * gap if units > 0 and gap > 0 else 0.0
         pdf.multi_cell(0, 7, sanitize_for_pdf(
-            f"Most Efficient: {best[0]} leads with {best[1]['avg_cost']:.2f} cost-per-unit despite {best[1]['total_spend']:,.0f} total spend, representing the efficiency benchmark."
+            f"Most Efficient: {best[0]} leads with {best[1]['avg_cost']:.2f} cost-per-unit despite {best[1]['total_spend']:,.0f} total spend."
         ))
         pdf.multi_cell(0, 7, sanitize_for_pdf(
-            f"Least Efficient: {worst[0]} shows {worst[1]['avg_cost']:.2f} cost-per-unit, presenting the largest optimization opportunity with potential savings of {est_savings:,.0f} (vendor currency)."
+            f"Least Efficient: {worst[0]} shows {worst[1]['avg_cost']:.2f} cost-per-unit, potential savings {est_savings:,.0f} (vendor currency)."
         ))
     else:
         pdf.multi_cell(0, 7, sanitize_for_pdf("Efficiency details unavailable."))
     pdf.ln(6)
 
-    # Material performance
+    # Material Category Performance
+    mat = compute_material_performance(k["df"])
+    needed = 12 + (max(1, len(mat)) * 7)
+    ensure_pdf_space(pdf, needed)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Material Category Performance"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-    mat = compute_material_performance(k["df"])
     if mat:
         for m, v in list(mat.items())[:10]:
+            ensure_pdf_space(pdf, 8)
             pdf.cell(0, 7, "- " + sanitize_for_pdf(f"{m}: {v:,.2f} {k['dominant']}"), ln=True)
     else:
         pdf.multi_cell(0, 7, sanitize_for_pdf("No material performance data available."))
     pdf.ln(8)
 
-    # Start dashboards on a new page
-    pdf.add_page()
-    pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, sanitize_for_pdf("Dashboard Charts"), ln=True)
-    pdf.set_text_color(0, 0, 0); pdf.ln(4)
-    captions = ["Monthly Spend Trend", "Top Vendors (Bar)", "Risk Breakdown", "Material Spend Distribution"]
-    for idx, ch in enumerate(charts):
-        if pdf.get_y() > 200:
-            pdf.add_page()
-        try:
-            y = pdf.get_y() + 6
-            pdf.image(ch, x=20, y=y, w=170)
-            pdf.ln(98)
-            pdf.set_font("Helvetica", "I", 10)
-            pdf.set_text_color(80, 80, 120)
-            cap = captions[idx] if idx < len(captions) else f"Figure {idx+1}"
-            pdf.cell(0, 6, sanitize_for_pdf(f"Figure {idx+1}: {cap}"), ln=True, align="C")
-            pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
-            pdf.ln(6)
-        except Exception:
-            continue
+    # DASHBOARD CHARTS - Start on new page
+    if charts:
+        pdf.add_page()
+        pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(0, 8, sanitize_for_pdf("Dashboard Charts"), ln=True)
+        pdf.set_text_color(0, 0, 0); pdf.ln(4)
+        captions = ["Monthly Spend Trend", "Top Vendors (Bar)", "Risk Breakdown", "Material Spend Distribution"]
+        for idx, ch in enumerate(charts):
+            # each chart needs ~100 mm height; ensure it
+            ensure_pdf_space(pdf, 110)
+            try:
+                y = pdf.get_y() + 6
+                pdf.image(ch, x=20, y=y, w=170)
+                pdf.ln(98)
+                pdf.set_font("Helvetica", "I", 10)
+                pdf.set_text_color(80, 80, 120)
+                cap = captions[idx] if idx < len(captions) else f"Figure {idx+1}"
+                pdf.cell(0, 6, sanitize_for_pdf(f"Figure {idx+1}: {cap}"), ln=True, align="C")
+                pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
+                pdf.ln(6)
+            except Exception:
+                # if an image fails, continue safely
+                continue
 
-    # Risk summary
+    # Risk Summary - ensure space
+    ensure_pdf_space(pdf, 40)
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 8, sanitize_for_pdf("Risk Summary"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 12)
     pdf.cell(0, 7, sanitize_for_pdf(f"Risk Score: {risk['score']:.1f} ({risk['band']})"), ln=True)
     for k_, v_ in risk.get("breakdown", {}).items():
+        ensure_pdf_space(pdf, 8)
         pdf.cell(0, 7, "- " + sanitize_for_pdf(f"{k_}: {v_:.1f}"), ln=True)
     pdf.ln(8)
 
     # AI tag at the end
     pdf.set_font("Helvetica", "I", 9)
     pdf.set_text_color(100, 100, 100)
+    ensure_pdf_space(pdf, 10)
     pdf.cell(0, 6, sanitize_for_pdf(AI_TAGLINE), ln=True)
 
-    # produce bytes
     out = io.BytesIO(pdf.output(dest="S").encode("latin-1", "ignore"))
     out.seek(0)
     return out
@@ -491,7 +506,6 @@ try:
     risk = compute_risk(k)
     ai_text = generate_ai_text(k)
 
-    # Build insights
     insights = [
         currency_exposure_insight_extended(k.get("totals", {})),
         monthly_quarterly_trend_insight_extended(k.get("monthly", {})),
@@ -554,7 +568,6 @@ try:
         if k.get("top_v"): captions.append("Top Vendors")
         if risk.get("breakdown"): captions.append("Risk Breakdown")
         if k.get("top_m"): captions.append("Material Spend Distribution")
-        # Streamlit expects a list of image paths or single image
         st.image(charts, caption=captions, use_container_width=True)
     else:
         st.info("Not enough data to generate charts.")
