@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v8
-# Adds company logo + tagline on every PDF page header
+# SAP Automatz – Procurement Analytics v9
+# Adds company logo + tagline on every PDF page header + fixes Streamlit rerun error
 
 import os
 import io
@@ -18,7 +18,7 @@ from fpdf import FPDF
 
 # ---------- CONFIG ----------
 MODEL = "gpt-4o-mini"
-LOGO_PATH = "sapautomatz_logo.png"  # <-- your uploaded logo file
+LOGO_PATH = "sapautomatz_logo.png"  # your uploaded logo file
 TAGLINE = "Automate. Analyze. Accelerate."
 VALID_KEYS = {"SAPMM-00000000000000", "DEMO-ACCESS-12345"}
 
@@ -40,7 +40,7 @@ st.divider()
 
 st.session_state.setdefault("verified", False)
 
-# ---------- HELPER FUNCTIONS ----------
+# ---------- HELPERS ----------
 def sanitize_text_for_pdf(text):
     return str(text or "").encode("latin-1", "ignore").decode("latin-1")
 
@@ -123,7 +123,7 @@ class PDF(FPDF):
         self.set_xy(32, 16)
         self.set_font("Helvetica", "I", 9)
         self.cell(0, 5, TAGLINE, ln=True)
-        self.ln(10)
+        self.ln(8)
         self.line(10, 25, 200, 25)
         self.ln(5)
 
@@ -135,7 +135,7 @@ class PDF(FPDF):
 # ---------- CHARTS ----------
 def generate_dashboard_charts(k, risk):
     chart_files = []
-    # Trend
+    # Monthly trend
     if k.get("monthly"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             plt.figure(figsize=(6, 3))
@@ -218,7 +218,7 @@ with col2:
         if key.strip() in VALID_KEYS:
             st.session_state["verified"] = True
             st.success("Access verified.")
-            st.experimental_rerun()
+            st.rerun()  # ✅ fixed Streamlit rerun
         else:
             st.error("Invalid key.")
 
