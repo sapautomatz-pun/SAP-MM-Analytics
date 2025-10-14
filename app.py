@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics v25
-# Fix: shortened vendor table header "Avg Inv Lag (d)" and adjusted column widths to avoid wrap/garbage
+# SAP Automatz – Procurement Analytics (SLA per-row/vendor/material support)
+# v26 — adds per-row SLA precedence, optional vendor SLA upload, sidebar default
 
 import os
 import io
@@ -30,7 +30,6 @@ TAGLINE = "Automate. Analyze. Accelerate."
 AI_TAGLINE = "Insights generated automatically by SAP Automatz AI Engine"
 VALID_KEYS = {"SAPMM-00000000000000", "DEMO-ACCESS-12345"}
 BRAND_BLUE = (26, 35, 126)  # #1a237e
-ON_TIME_WINDOW_DAYS = 7  # threshold to consider GR on-time (adjustable)
 
 # ---------- STREAMLIT SETUP ----------
 st.set_page_config(page_title="SAP Automatz – Procurement Analytics", layout="wide")
@@ -53,7 +52,6 @@ def sanitize_for_pdf(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    # replace known problematic unicode with ASCII equivalents
     s = s.replace("–", "-").replace("—", "-").replace("•", "-").replace("“", '"').replace("”", '"').replace("’", "'")
     s_norm = unicodedata.normalize("NFKD", s)
     s_ascii = s_norm.encode("ascii", "ignore").decode("ascii")
@@ -153,6 +151,8 @@ def prepare_dataframe(df: pd.DataFrame):
     if gr_status_col and gr_status_col != "GR_STATUS":
         df.rename(columns={gr_status_col: "GR_STATUS"}, inplace=True)
 
+    # optional SLA columns might be present: SLA_DAYS, VENDOR_SLA, MATERIAL_SLA
+    # normalize existence
     if "AMOUNT" not in df.columns:
         df["AMOUNT"] = 0.0
     if "CURRENCY" not in df.columns:
@@ -192,9 +192,15 @@ def prepare_dataframe(df: pd.DataFrame):
         df["GR_STATUS_NORM"] = df["GR_STATUS"].astype(str).str.lower().str.strip()
     else:
         df["GR_STATUS_NORM"] = np.where(df["GR_QTY_NUM"] >= df["PO_QTY_NUM"], "complete", "partial")
+
+    # normalize SLA columns if present
+    for sla_col in ["SLA_DAYS", "VENDOR_SLA", "MATERIAL_SLA"]:
+        if sla_col in df.columns:
+            df[sla_col] = pd.to_numeric(df[sla_col], errors="coerce")
+            df.loc[df[sla_col] < 0, sla_col] = np.nan
+
     return df
 
-# ---------- KPIs ----------
 def compute_kpis(df: pd.DataFrame):
     df = prepare_dataframe(df)
     totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict() if "CURRENCY_DETECTED" in df.columns else {}
@@ -211,7 +217,6 @@ def compute_kpis(df: pd.DataFrame):
     return {"totals": totals, "total_spend": total_spend, "dominant": dominant,
             "top_v": top_v, "top_m": top_m, "monthly": monthly, "df": df, "records": len(df)}
 
-# ---------- RISK & EFFICIENCY ----------
 def compute_risk(k: dict):
     df = k.get("df", pd.DataFrame())
     total = float(k.get("total_spend", 0.0) or 0.0)
@@ -247,48 +252,131 @@ def compute_efficiency_summary(df: pd.DataFrame):
         eff[v] = {"avg_cost": ac, "total_spend": ts, "units_est": units}
     return eff
 
+# ---------- SLA precedence helpers ----------
+def build_vendor_sla_map_from_file(uploaded_file):
+    """
+    Expect CSV with columns: VENDOR,SLA_DAYS (case-insensitive).
+    Returns dict vendor -> sla_days (int)
+    """
+    if uploaded_file is None:
+        return {}
+    try:
+        vdf = pd.read_csv(uploaded_file)
+        # Normalize column names
+        cols = {c.upper(): c for c in vdf.columns}
+        vendor_col = None
+        sla_col = None
+        for k, v in cols.items():
+            if k in ("VENDOR", "SUPPLIER", "VENDOR_NAME"):
+                vendor_col = v
+            if k in ("SLA_DAYS", "SLA", "ON_TIME_DAYS", "THRESHOLD"):
+                sla_col = v
+        if vendor_col is None or sla_col is None:
+            return {}
+        vdf[vendor_col] = vdf[vendor_col].astype(str).str.strip()
+        vdf[sla_col] = pd.to_numeric(vdf[sla_col], errors="coerce")
+        vdf = vdf.dropna(subset=[sla_col])
+        mapping = dict(zip(vdf[vendor_col], vdf[sla_col].astype(int)))
+        return mapping
+    except Exception:
+        return {}
+
+def apply_threshold_precedence(df, vendor_sla_map=None, global_default=7):
+    """
+    Apply precedence to determine ON_TIME_THRESHOLD per row:
+      1. SLA_DAYS (row)
+      2. vendor_sla_map (uploaded)
+      3. VENDOR_SLA (row)
+      4. MATERIAL_SLA (row)
+      5. global_default
+    """
+    df = df.copy()
+    vendor_sla_map = vendor_sla_map or {}
+    # ensure SLA columns numeric (prepare_dataframe already did this but re-check)
+    for c in ["SLA_DAYS", "VENDOR_SLA", "MATERIAL_SLA"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+            df.loc[df[c] < 0, c] = np.nan
+
+    def choose_threshold(r):
+        # 1) SLA_DAYS column
+        if pd.notna(r.get("SLA_DAYS")):
+            return int(r["SLA_DAYS"])
+        # 2) uploaded vendor SLA mapping
+        v = r.get("VENDOR")
+        if isinstance(v, str) and v in vendor_sla_map:
+            try:
+                return int(vendor_sla_map[v])
+            except Exception:
+                pass
+        # 3) VENDOR_SLA column on row
+        if pd.notna(r.get("VENDOR_SLA")):
+            return int(r["VENDOR_SLA"])
+        # 4) MATERIAL_SLA column
+        if pd.notna(r.get("MATERIAL_SLA")):
+            return int(r["MATERIAL_SLA"])
+        # fallback
+        return int(global_default)
+
+    # apply
+    df["ON_TIME_THRESHOLD"] = df.apply(choose_threshold, axis=1)
+    return df
+
 # ---------- VENDOR PERFORMANCE ----------
 def compute_vendor_performance(df: pd.DataFrame):
+    """
+    Expects df with ON_TIME_THRESHOLD, PO_DATE, GR_DATE, PO_QTY_NUM, GR_QTY_NUM, INVOICE_DATE, AMOUNT_NUM.
+    Returns a vendor-level dataframe with applied SLA (mean per vendor), fulfillment, on-time %, avg invoice lag, etc.
+    """
     if "VENDOR" not in df.columns or df.empty:
         return pd.DataFrame()
-    g = df.groupby("VENDOR").agg(
+    df_rows = df.copy()
+    # compute gr_days and invoice_lag
+    df_rows["gr_days"] = (df_rows["GR_DATE"] - df_rows["PO_DATE"]).dt.days
+    df_rows["invoice_lag"] = (df_rows["INVOICE_DATE"] - df_rows["GR_DATE"]).dt.days
+    # is_on_time using per-row threshold
+    df_rows["is_on_time"] = False
+    mask = (~df_rows["GR_DATE"].isna()) & (~df_rows["PO_DATE"].isna())
+    if mask.any():
+        # apply per-row comparison
+        df_rows.loc[mask, "is_on_time"] = df_rows.loc[mask].apply(lambda r: (pd.notna(r["gr_days"]) and pd.notna(r["ON_TIME_THRESHOLD"]) and r["gr_days"] <= r["ON_TIME_THRESHOLD"]), axis=1)
+
+    df_rows["is_partial"] = np.where(df_rows["GR_QTY_NUM"] < df_rows["PO_QTY_NUM"], 1, 0)
+
+    # aggregate
+    g = df_rows.groupby("VENDOR").agg(
         total_po_qty=pd.NamedAgg(column="PO_QTY_NUM", aggfunc="sum"),
         total_gr_qty=pd.NamedAgg(column="GR_QTY_NUM", aggfunc="sum"),
         total_spend=pd.NamedAgg(column="AMOUNT_NUM", aggfunc="sum"),
+        avg_gr_days=pd.NamedAgg(column="gr_days", aggfunc=lambda x: x.dropna().mean()),
+        avg_invoice_lag=pd.NamedAgg(column="invoice_lag", aggfunc=lambda x: x.dropna().mean()),
+        ontime_pct=pd.NamedAgg(column="is_on_time", aggfunc=lambda x: x.dropna().mean()),
+        partial_pct=pd.NamedAgg(column="is_partial", aggfunc=lambda x: x.dropna().mean()),
+        applied_sla_mean=pd.NamedAgg(column="ON_TIME_THRESHOLD", aggfunc=lambda x: int(np.round(np.nanmean(x))) if x.notna().any() else np.nan),
+        rows_count=pd.NamedAgg(column="VENDOR", aggfunc="count")
     )
-    g["fulfillment_rate"] = np.where(g["total_po_qty"] > 0, g["total_gr_qty"] / g["total_po_qty"], np.nan)
-    df_rows = df[["VENDOR", "PO_DATE", "GR_DATE", "INVOICE_DATE", "GR_STATUS_NORM", "PO_QTY_NUM", "GR_QTY_NUM", "AMOUNT_NUM"]].copy()
-    df_rows["on_time"] = False
-    mask = (~df_rows["GR_DATE"].isna()) & (~df_rows["PO_DATE"].isna())
-    df_rows.loc[mask, "on_time"] = (df_rows.loc[mask, "GR_DATE"] - df_rows.loc[mask, "PO_DATE"]).dt.days <= ON_TIME_WINDOW_DAYS
-    ontime = df_rows.groupby("VENDOR")["on_time"].mean().fillna(0) * 100.0
-    g["on_time_pct"] = ontime
-    df_rows["invoice_lag"] = np.nan
-    mask2 = (~df_rows["INVOICE_DATE"].isna()) & (~df_rows["GR_DATE"].isna())
-    df_rows.loc[mask2, "invoice_lag"] = (df_rows.loc[mask2, "INVOICE_DATE"] - df_rows.loc[mask2, "GR_DATE"]).dt.days
-    invlag = df_rows.groupby("VENDOR")["invoice_lag"].mean().fillna(np.nan)
-    g["avg_invoice_lag"] = invlag
-    status_counts = df_rows.groupby(["VENDOR", "GR_STATUS_NORM"]).size().unstack(fill_value=0)
-    for col in status_counts.columns:
-        g[f"status_{col}"] = status_counts[col]
-    for col in ["status_complete", "status_partial", "status_nan"]:
-        if col not in g.columns:
-            g[col] = 0
-    g = g.sort_values("total_spend", ascending=False)
+    # derived fields
+    g["fulfillment_rate"] = np.where(g["total_po_qty"] > 0, g["total_gr_qty"] / g["total_po_qty"], 0.0)
+    g["ontime_pct"] = g["ontime_pct"].fillna(0.0) * 100.0
+    g["partial_pct"] = g["partial_pct"].fillna(0.0) * 100.0
+    g["avg_gr_days"] = g["avg_gr_days"].fillna(np.nan)
+    g["avg_invoice_lag"] = g["avg_invoice_lag"].fillna(np.nan)
     g = g.reset_index().rename(columns={"index": "VENDOR"})
-    return g
+    # reorder/rename for clarity
+    out = g[["VENDOR", "applied_sla_mean", "total_po_qty", "total_gr_qty", "fulfillment_rate", "ontime_pct", "partial_pct", "avg_gr_days", "avg_invoice_lag", "total_spend", "rows_count"]]
+    out = out.rename(columns={"applied_sla_mean": "SLA_days", "total_po_qty": "total_po_qty", "total_gr_qty": "total_gr_qty"})
+    out = out.sort_values("total_spend", ascending=False).reset_index(drop=True)
+    return out
 
-# ---------- INSIGHTS ----------
+# ---------- INSIGHTS & AI TEXT (unchanged) ----------
 def currency_exposure_insight_extended(totals: dict):
-    """Return clear single-currency or multi-currency message."""
     if not totals:
         return "Currency Exposure: No currency data available."
     total = sum(totals.values())
     if len(totals) == 1:
         cur = list(totals.keys())[0]
         amt = totals[cur]
-        return f"Currency Exposure — Single currency ({cur}): {amt:,.0f} ({100.0:.1f}%)."
-    # multi-currency
+        return f"Currency Exposure — Single currency ({cur}): {amt:,.0f} (100.0%)."
     items = sorted(totals.items(), key=lambda x: x[1], reverse=True)
     parts = [f"{cur}: {amt:,.0f} ({amt/total*100:.1f}%)" for cur, amt in items[:4]]
     exposure_others = 100.0 - sum((amt/total*100.0) for _, amt in items[:1])
@@ -359,19 +447,18 @@ def vendor_performance_insight_extended(vperf_df: pd.DataFrame):
         return "Vendor Performance: Not enough PO/GR quantity data to compute fulfillment rates."
     best = valid.sort_values("fulfillment_rate", ascending=False).iloc[0]
     worst = valid.sort_values("fulfillment_rate", ascending=True).iloc[0]
-    ontime_best = vperf_df.sort_values("on_time_pct", ascending=False).iloc[0]
+    ontime_best = vperf_df.sort_values("ontime_pct", ascending=False).iloc[0]
     avg_inv_lag = vperf_df["avg_invoice_lag"].dropna()
     avg_inv_lag_val = avg_inv_lag.mean() if not avg_inv_lag.empty else np.nan
     lines = [
         f"Vendor Performance: Best fulfillment: {best['VENDOR']} ({best['fulfillment_rate']*100:.1f}% filled).",
         f"Worst fulfillment: {worst['VENDOR']} ({worst['fulfillment_rate']*100:.1f}% filled).",
-        f"Best on-time deliveries: {ontime_best['VENDOR']} ({ontime_best['on_time_pct']:.1f}% on-time).",
+        f"Best on-time deliveries: {ontime_best['VENDOR']} ({ontime_best['ontime_pct']:.1f}% on-time).",
         f"Average invoice lag across vendors (days): {avg_inv_lag_val:.1f} (NaN if no invoice dates).",
         "Recommend engaging low-fulfillment vendors for corrective action and improving invoice processing for lagging suppliers."
     ]
     return " ".join(lines)
 
-# ---------- generate_ai_text ----------
 def generate_ai_text(k: dict):
     total = k.get("total_spend", 0.0)
     currency = k.get("dominant", "INR")
@@ -394,7 +481,7 @@ def generate_ai_text(k: dict):
     return (f"Total procurement spend was {total:,.2f} {currency}{exposure_text}. "
             f"Top vendors by spend: {top_v_text}.{risk_est} Overall procurement performance indicates opportunities in vendor optimization, delivery fulfillment, and invoice processing.")
 
-# ---------- CHARTS ----------
+# ---------- CHARTS (unchanged) ----------
 def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame):
     charts = []
     try:
@@ -458,7 +545,7 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
         plt.close()
     return charts
 
-# ---------- PDF helpers ----------
+# ---------- PDF helpers (unchanged from v25, with SLA column included) ----------
 def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
     try:
         bottom_limit = pdf_obj.h - pdf_obj.b_margin
@@ -491,7 +578,6 @@ class PDF(FPDF):
 def _pdf_table_row(pdf, row_cells, col_widths, font_size=9, alignments=None):
     if alignments is None:
         alignments = ['L'] * len(row_cells)
-    # estimate height by character heuristic
     sanitized = [sanitize_for_pdf(str(x)) for x in row_cells]
     est_lines = []
     for text, w in zip(sanitized, col_widths):
@@ -560,36 +646,40 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         _pdf_table_row(pdf, [kname, kval], col_w, font_size=10, alignments=['L','R'])
     pdf.ln(6)
 
-    # Vendor Performance table into PDF (top N)
+    # Vendor Performance - include SLA_days column
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Vendor Performance (Top)"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
     if not vendor_perf_df.empty:
         vdf = vendor_perf_df.copy().head(10)
-        # Shorter header label for Avg Inv Lag to avoid wrap/garbage
-        headers = ["Vendor", "PO Qty", "GR Qty", "Fulfill %", "On-time %", "Avg Inv Lag (d)", "Total Spend"]
-        # adjusted column widths to avoid wrapping garbage (Avg Inv Lag column widened)
-        col_w = [60, 18, 18, 20, 18, 30, 22]  # sum approx fits page margins
+        headers = ["Vendor", "SLA (d)", "PO Qty", "GR Qty", "Fulfill %", "On-time %", "Partial %", "Avg GR d", "Avg Inv Lag (d)", "Total Spend"]
+        col_w = [55, 14, 16, 16, 18, 18, 18, 18, 20, 26]  # adjusted widths
         pdf.set_font("Helvetica", "B", 9)
-        _pdf_table_row(pdf, [sanitize_for_pdf(h) for h in headers], col_w, font_size=9, alignments=['L','R','R','R','R','R','R'])
+        _pdf_table_row(pdf, [sanitize_for_pdf(h) for h in headers], col_w, font_size=9, alignments=['L'] + ['R'] * (len(col_w)-1))
         pdf.set_font("Helvetica", "", 9)
         for _, row in vdf.iterrows():
             vendor = row.get("VENDOR", "")
+            sla = int(row.get("SLA_days")) if pd.notna(row.get("SLA_days")) else ""
             poq = int(row.get("total_po_qty") or 0)
             grq = int(row.get("total_gr_qty") or 0)
-            fulfill = (row.get("fulfillment_rate") * 100.0) if pd.notna(row.get("fulfillment_rate")) else np.nan
-            ontime = row.get("on_time_pct") if pd.notna(row.get("on_time_pct")) else np.nan
+            fulfill = row.get("fulfillment_rate") * 100.0 if pd.notna(row.get("fulfillment_rate")) else np.nan
+            ontime = row.get("ontime_pct") if pd.notna(row.get("ontime_pct")) else np.nan
+            partial = row.get("partial_pct") if pd.notna(row.get("partial_pct")) else np.nan
+            avg_gr = row.get("avg_gr_days") if pd.notna(row.get("avg_gr_days")) else ""
             invlag = row.get("avg_invoice_lag") if pd.notna(row.get("avg_invoice_lag")) else ""
             tspend = row.get("total_spend") if pd.notna(row.get("total_spend")) else 0.0
             cells = [
                 vendor,
+                f"{sla}" if sla != "" else "",
                 f"{poq}",
                 f"{grq}",
                 f"{fulfill:.1f}" if not pd.isna(fulfill) else "",
                 f"{ontime:.1f}" if not pd.isna(ontime) else "",
+                f"{partial:.1f}" if not pd.isna(partial) else "",
+                f"{avg_gr:.1f}" if isinstance(avg_gr, (int, float)) and not pd.isna(avg_gr) else "",
                 f"{invlag:.1f}" if isinstance(invlag, (int, float)) and not pd.isna(invlag) else "",
                 f"{tspend:,.2f}"
             ]
-            _pdf_table_row(pdf, cells, col_w, font_size=8, alignments=['L','R','R','R','R','R','R'])
+            _pdf_table_row(pdf, cells, col_w, font_size=8, alignments=['L'] + ['R'] * (len(col_w)-1))
     else:
         pdf.multi_cell(0, 6, "Vendor performance data not available.")
     pdf.ln(6)
@@ -611,7 +701,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         pdf.multi_cell(0, 6, "Material category data not available.")
     pdf.ln(6)
 
-    # Charts: each with computed height
+    # Charts
     if charts:
         pdf.add_page()
         pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Dashboard Charts"), ln=True)
@@ -672,20 +762,37 @@ with col2:
 if not st.session_state["verified"]:
     st.stop()
 
-file = st.file_uploader("Upload Procurement File (CSV/XLSX)", type=["csv", "xlsx"])
+st.sidebar.header("SLA / Thresholds")
+default_on_time_days = st.sidebar.slider("Default on-time threshold (days)", min_value=0, max_value=90, value=7, help="Default PO -> GR SLA in days if none specified per PO/vendor/material")
+st.sidebar.markdown("You can also upload a Vendor SLA CSV with columns `VENDOR,SLA_DAYS` (optional).")
+
+vendor_sla_file = st.sidebar.file_uploader("Optional: Vendor SLA file (CSV)", type=["csv"], key="vendor_sla_upload")
+
+file = st.file_uploader("Upload Procurement File (CSV/XLSX) — include SLA_DAYS / VENDOR_SLA / MATERIAL_SLA if you want per-row thresholds", type=["csv", "xlsx"])
 if not file:
     st.info("Please upload your procurement extract.")
     st.stop()
 
 company = st.text_input("Enter Company Name", "ABC Manufacturing Pvt Ltd")
+
 try:
     df = pd.read_excel(file) if file.name.lower().endswith(".xlsx") else pd.read_csv(file)
     k = compute_kpis(df)
+
+    # Build vendor SLA map from uploaded file (if present)
+    vendor_sla_map = build_vendor_sla_map_from_file(vendor_sla_file)
+
+    # Apply threshold precedence and update df inside k
+    df_with_sla = apply_threshold_precedence(k["df"], vendor_sla_map=vendor_sla_map, global_default=default_on_time_days)
+    k["df"] = df_with_sla
+
+    # recompute risk / ai text based on updated df
     risk = compute_risk(k)
     ai_text = generate_ai_text(k)
 
     vendor_perf_df = compute_vendor_performance(k["df"])
 
+    # Prepare insights
     insights = []
     insights.append(currency_exposure_insight_extended(k.get("totals", {})))
     insights.append(monthly_quarterly_trend_insight_extended(k.get("monthly", {})))
@@ -696,6 +803,7 @@ try:
     insights.append(efficiency_insight_summary(eff_summary))
     insights.append(current_month_snapshot(k.get("monthly", {}), k.get("top_v", {})))
 
+    # Display insights & summary
     st.markdown("## Procurement Insights (Expanded)")
     for ins in insights:
         st.write(ins)
@@ -717,14 +825,30 @@ try:
     for c, label, val in zip(cols, labels, metrics_vals):
         c.metric(label, str(val))
 
+    # Vendor Performance - show SLA (applied) column
     st.markdown("### Vendor Performance")
     if not vendor_perf_df.empty:
         display_df = vendor_perf_df.copy()
-        display_df["fulfillment_rate_pct"] = (display_df["fulfillment_rate"] * 100).round(1)
-        display_df["avg_invoice_lag"] = display_df["avg_invoice_lag"].round(1)
-        st.dataframe(display_df[["VENDOR", "total_po_qty", "total_gr_qty", "fulfillment_rate_pct", "on_time_pct", "avg_invoice_lag", "total_spend"]].rename(
-            columns={"total_po_qty":"PO Qty","total_gr_qty":"GR Qty","fulfillment_rate_pct":"Fulfillment (%)","on_time_pct":"On-time (%)","avg_invoice_lag":"Avg Inv Lag (days)","total_spend":"Total Spend"}
-        ).sort_values("Total Spend", ascending=False))
+        # rename columns to friendlier labels
+        display_df = display_df.rename(columns={
+            "SLA_days":"SLA (d)",
+            "total_po_qty":"PO Qty",
+            "total_gr_qty":"GR Qty",
+            "fulfillment_rate":"Fulfillment",
+            "ontime_pct":"On-time (%)",
+            "partial_pct":"Partial (%)",
+            "avg_gr_days":"Avg GR (d)",
+            "avg_invoice_lag":"Avg Inv Lag (d)",
+            "total_spend":"Total Spend",
+            "rows_count":"Rows"
+        })
+        display_df["Fulfillment"] = (display_df["Fulfillment"] * 100.0).round(1)
+        display_df["On-time (%)"] = display_df["On-time (%)"].round(1)
+        display_df["Partial (%)"] = display_df["Partial (%)"].round(1)
+        display_df["Avg GR (d)"] = display_df["Avg GR (d)"].round(1)
+        display_df["Avg Inv Lag (d)"] = display_df["Avg Inv Lag (d)"].round(1)
+        display_df["Total Spend"] = display_df["Total Spend"].round(2)
+        st.dataframe(display_df[["VENDOR","SLA (d)","PO Qty","GR Qty","Fulfillment","On-time (%)","Partial (%)","Avg GR (d)","Avg Inv Lag (d)","Total Spend"]].sort_values("Total Spend", ascending=False))
     else:
         st.write("No vendor quantity/GR/invoice data available.")
 
