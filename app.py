@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics (v26.2)
-# Fix: improved PDF table rendering using FPDF.get_string_width to avoid wrapping/garbage
+# SAP Automatz – Procurement Analytics (v26.3)
+# Fix: PDF table header & body alignment (draw header with cell(), accurate body height using get_string_width)
 
 import os
 import io
@@ -53,8 +53,8 @@ def sanitize_for_pdf(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    # replace known problematic unicode with ASCII equivalents
-    s = s.replace("–", "-").replace("—", "-").replace("•", "-").replace("“", '"').replace("”", '"').replace("’", "'")
+    s = s.replace("–", "-").replace("—", "-").replace("•", "-") \
+         .replace("“", '"').replace("”", '"').replace("’", "'")
     s = s.replace("\t", " ").replace("\r", " ")
     s_norm = unicodedata.normalize("NFKD", s)
     s_ascii = s_norm.encode("ascii", "ignore").decode("ascii")
@@ -204,7 +204,7 @@ def prepare_dataframe(df: pd.DataFrame):
 
     return df
 
-# ---------- KPI / RISK / EFFICIENCY (unchanged) ----------
+# ---------- KPI / RISK / EFFICIENCY ----------
 def compute_kpis(df: pd.DataFrame):
     df = prepare_dataframe(df)
     totals = df.groupby("CURRENCY_DETECTED")["AMOUNT_NUM"].sum().to_dict() if "CURRENCY_DETECTED" in df.columns else {}
@@ -266,7 +266,6 @@ def build_vendor_sla_map_from_file(uploaded_file):
         return {}
     try:
         vdf = pd.read_csv(uploaded_file)
-        # Normalize column names
         cols = {c.upper(): c for c in vdf.columns}
         vendor_col = None
         sla_col = None
@@ -359,7 +358,7 @@ def compute_vendor_performance(df: pd.DataFrame):
     out = out.sort_values("total_spend", ascending=False).reset_index(drop=True)
     return out
 
-# ---------- INSIGHTS & AI TEXT (unchanged) ----------
+# ---------- INSIGHTS & AI TEXT ----------
 def currency_exposure_insight_extended(totals: dict):
     if not totals:
         return "Currency Exposure: No currency data available."
@@ -472,7 +471,7 @@ def generate_ai_text(k: dict):
     return (f"Total procurement spend was {total:,.2f} {currency}{exposure_text}. "
             f"Top vendors by spend: {top_v_text}.{risk_est} Overall procurement performance indicates opportunities in vendor optimization, delivery fulfillment, and invoice processing.")
 
-# ---------- CHARTS (unchanged) ----------
+# ---------- CHARTS ----------
 def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame):
     charts = []
     try:
@@ -536,7 +535,7 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
         plt.close()
     return charts
 
-# ---------- PDF helpers (accurate width/height calculation) ----------
+# ---------- PDF helpers (new draw_table function) ----------
 def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
     try:
         bottom_limit = pdf_obj.h - pdf_obj.b_margin
@@ -567,83 +566,77 @@ class PDF(FPDF):
         self.cell(0, 10, f"SAP Automatz | Page {self.page_no()}", 0, 0, "C")
 
 def _normalize_col_widths(pdf: PDF, col_w, ncols):
-    """
-    Scale/provide column widths so they exactly fit the usable PDF width (mm).
-    - pdf: PDF instance
-    - col_w: list of proposed widths (can be any scale); if None or length mismatch create equal widths.
-    - ncols: number of columns expected
-    Returns list of widths (mm) length == ncols.
-    """
     usable = pdf.w - pdf.l_margin - pdf.r_margin  # mm
     if not col_w or len(col_w) != ncols:
-        # equal distribution
         return [usable / ncols for _ in range(ncols)]
     total = sum(col_w)
     if total <= 0:
         return [usable / ncols for _ in range(ncols)]
     factor = usable / total
-    w_scaled = [max(6.0, float(w) * factor) for w in col_w]  # ensure min width of 6mm
-    # re-normalize to exact usable sum (avoid rounding gaps)
+    w_scaled = [max(6.0, float(w) * factor) for w in col_w]
     s = sum(w_scaled)
     if abs(s - usable) > 0.01:
         diff = usable - s
-        w_scaled[0] += diff  # add remaining to first column
+        w_scaled[0] += diff
     return w_scaled
 
-def _pdf_table_row(pdf, row_cells, col_widths=None, font_size=9, alignments=None):
+def draw_table(pdf: PDF, headers, rows, proposed_w=None, header_font_size=9, row_font_size=8, alignments=None):
     """
-    Render a row with dynamic wrapping and autoscaled widths.
-    Uses FPDF.get_string_width for accurate width measurement.
+    Draw a table:
+      - Header row drawn using pdf.cell(...) (single row, centered) to avoid header wrap misalignment.
+      - Body rows drawn with multi_cell per cell, using get_string_width to compute accurate wrapping and row height.
     """
-    ncols = len(row_cells)
-    col_widths_norm = _normalize_col_widths(pdf, col_widths, ncols)
+    ncols = len(headers)
+    col_w = _normalize_col_widths(pdf, proposed_w, ncols)
+    # Draw header (single line cells)
+    header_h = max(7, header_font_size * 0.6 + 4)
+    pdf.set_font("Helvetica", "B", header_font_size)
+    pdf.set_text_color(*BRAND_BLUE)
+    for h, w in zip(headers, col_w):
+        pdf.cell(w, header_h, sanitize_for_pdf(h), border=1, align="C")
+    pdf.ln(header_h)
+    pdf.set_text_color(0, 0, 0)
+    # Prepare alignments
     if alignments is None:
-        alignments = ['L'] * ncols
-    # sanitize and convert types
-    sanitized = [sanitize_for_pdf("" if x is None else str(x)) for x in row_cells]
-    # ensure font set before get_string_width calls
-    pdf.set_font("Helvetica", size=font_size)
-    # approximate internal padding (mm)
-    cell_h_padding = 1.5  # line height internal padding
-    # compute estimated lines for each cell given width using get_string_width
-    est_lines = []
-    for text, w in zip(sanitized, col_widths_norm):
-        # handle explicit newlines: treat each line separately
-        parts = text.split("\n")
-        max_lines = 0
-        inner_w = max(1.0, w - 2.0)  # leave small padding
-        for part in parts:
-            # if empty string
-            if part.strip() == "":
-                needed = 1
-            else:
-                text_width = pdf.get_string_width(part)
-                # get_string_width returns width in user units (mm). number of lines = ceil(text_width / inner_w)
-                needed = int(np.ceil(text_width / inner_w))
-                needed = max(1, needed)
-            max_lines = max(max_lines, needed)
-        est_lines.append(max_lines)
-    lines_needed = max(est_lines) if est_lines else 1
-    # line height (mm)
-    line_h = max(4.0, font_size * 0.35 + 2)
-    cell_h = lines_needed * line_h + 2  # add small vertical padding
-    ensure_pdf_space(pdf, cell_h + 2)
-    x_start = pdf.get_x()
-    y_start = pdf.get_y()
-    # draw each cell: set font and use multi_cell with given width & line_h
-    for i, (text, w) in enumerate(zip(sanitized, col_widths_norm)):
-        pdf.set_font("Helvetica", size=font_size)
-        align = alignments[i] if i < len(alignments) else 'L'
-        x = pdf.get_x()
-        y = pdf.get_y()
-        # use multi_cell; but we need to ensure the cell height is lines_needed*line_h
-        # write text with multi_cell; it will wrap as necessary
-        pdf.multi_cell(w, line_h, text, border=1, align=align)
-        # move to right of cell for next column
-        pdf.set_xy(x + w, y)
-    # move cursor down to the next row baseline (the tallest cell height)
-    pdf.ln(cell_h - (pdf.get_string_width("") * 0))  # keep ln(cell_h)
+        alignments = ['L'] + ['R'] * (ncols - 1)
+    # Draw rows
+    for row in rows:
+        # sanitize row values
+        sanitized = [sanitize_for_pdf("" if v is None else str(v)) for v in row]
+        # set font for measuring
+        pdf.set_font("Helvetica", size=row_font_size)
+        # compute number of lines per cell using get_string_width
+        est_lines = []
+        for text, w in zip(sanitized, col_w):
+            parts = text.split("\n")
+            inner_w = max(1.0, w - 2.0)
+            max_lines = 0
+            for part in parts:
+                if part.strip() == "":
+                    needed = 1
+                else:
+                    text_width = pdf.get_string_width(part)
+                    needed = int(np.ceil(text_width / inner_w))
+                    needed = max(1, needed)
+                max_lines = max(max_lines, needed)
+            est_lines.append(max_lines)
+        lines_needed = max(est_lines) if est_lines else 1
+        line_h = max(4.0, row_font_size * 0.35 + 2)
+        cell_h = lines_needed * line_h + 2
+        ensure_pdf_space(pdf, cell_h + 2)
+        x_start = pdf.get_x()
+        y_start = pdf.get_y()
+        for i, (text, w) in enumerate(zip(sanitized, col_w)):
+            align = alignments[i] if i < len(alignments) else 'L'
+            x = pdf.get_x()
+            y = pdf.get_y()
+            # draw cell content (multi_cell wraps as needed)
+            pdf.multi_cell(w, line_h, text, border=1, align=align)
+            pdf.set_xy(x + w, y)
+        # move down exactly cell_h
+        pdf.ln(cell_h)
 
+# ---------- generate_pdf (uses draw_table for vendor/material tables) ----------
 def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf = PDF(); pdf.alias_nb_pages(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 20); pdf.set_text_color(*BRAND_BLUE)
@@ -685,25 +678,21 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf.ln(2)
     col_w = [90, 90]
     pdf.set_font("Helvetica", "B", 10)
-    _pdf_table_row(pdf, ["Metric", "Value"], col_w, font_size=10, alignments=['L','R'])
-    pdf.set_font("Helvetica", "", 10)
-    for kname, kval in metrics:
-        _pdf_table_row(pdf, [kname, kval], col_w, font_size=10, alignments=['L','R'])
+    # Use draw_table for consistent header + rows
+    draw_table(pdf, ["Metric", "Value"], [(m[0], m[1]) for m in metrics], proposed_w=col_w, header_font_size=10, row_font_size=10, alignments=['L','R'])
     pdf.ln(6)
 
-    # Vendor Performance - include SLA_days column; use dynamic width normalization
+    # Vendor Performance - include SLA_days column; use draw_table with proposed widths
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Vendor Performance (Top)"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
     if not vendor_perf_df.empty:
         vdf = vendor_perf_df.copy().head(12)
         headers = ["Vendor", "SLA (d)", "PO Qty", "GR Qty", "Fulfill %", "On-time %", "Partial %", "Avg GR d", "Avg Inv Lag (d)", "Total Spend"]
-        # Proposal widths (will be normalized to page width)
-        proposed_w = [60, 12, 14, 14, 16, 16, 16, 12, 16, 24]
-        pdf.set_font("Helvetica", "B", 9)
-        _pdf_table_row(pdf, [sanitize_for_pdf(h) for h in headers], proposed_w, font_size=9, alignments=['L'] + ['R'] * (len(headers)-1))
-        pdf.set_font("Helvetica", "", 9)
+        # proposal widths (Vendor column bigger; numeric columns narrower). These will be normalized to usable width.
+        proposed_w = [65, 12, 12, 12, 14, 14, 14, 12, 14, 25]
+        rows = []
         for _, row in vdf.iterrows():
-            vendor = sanitize_for_pdf(row.get("VENDOR", ""))
+            vendor = row.get("VENDOR", "")
             sla = int(row.get("SLA_days")) if pd.notna(row.get("SLA_days")) else ""
             poq = int(row.get("total_po_qty") or 0)
             grq = int(row.get("total_gr_qty") or 0)
@@ -725,7 +714,9 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
                 f"{invlag:.1f}" if isinstance(invlag, (int, float)) and not pd.isna(invlag) else "",
                 f"{tspend:,.2f}"
             ]
-            _pdf_table_row(pdf, cells, proposed_w, font_size=8, alignments=['L'] + ['R'] * (len(headers)-1))
+            rows.append(cells)
+        draw_table(pdf, headers, rows, proposed_w=proposed_w, header_font_size=9, row_font_size=8,
+                   alignments=['L','R','R','R','R','R','R','R','R','R'])
     else:
         pdf.multi_cell(0, 6, "Vendor performance data not available.")
     pdf.ln(6)
@@ -737,12 +728,10 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     if mat:
         items = list(mat.items())
         items = sorted(items, key=lambda x: x[1], reverse=True)[:12]
-        col_w = [120, 60]
-        pdf.set_font("Helvetica", "B", 9)
-        _pdf_table_row(pdf, ["Material", "Spend"], col_w, font_size=9, alignments=['L','R'])
-        pdf.set_font("Helvetica", "", 9)
-        for m, val in items:
-            _pdf_table_row(pdf, [m, f"{val:,.2f}"], col_w, font_size=9, alignments=['L','R'])
+        headers = ["Material", "Spend"]
+        proposed_w = [120, 70]
+        rows = [[m, f"{val:,.2f}"] for m, val in items]
+        draw_table(pdf, headers, rows, proposed_w=proposed_w, header_font_size=9, row_font_size=9, alignments=['L','R'])
     else:
         pdf.multi_cell(0, 6, "Material category data not available.")
     pdf.ln(6)
@@ -792,7 +781,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     out.seek(0)
     return out
 
-# ---------- APP FLOW (unchanged) ----------
+# ---------- APP FLOW ----------
 st.subheader("🔐 Verify Access Key")
 col1, col2 = st.columns([3, 1])
 with col1:
