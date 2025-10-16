@@ -1,6 +1,6 @@
 # app.py
-# SAP Automatz – Procurement Analytics (v26.3)
-# Fix: PDF table header & body alignment (draw header with cell(), accurate body height using get_string_width)
+# SAP Automatz – Procurement Analytics (v26.4)
+# Fix: Adaptive PDF table column sizing to avoid overlapping headers and content
 
 import os
 import io
@@ -320,10 +320,6 @@ def apply_threshold_precedence(df, vendor_sla_map=None, global_default=7):
 
 # ---------- VENDOR PERFORMANCE ----------
 def compute_vendor_performance(df: pd.DataFrame):
-    """
-    Expects df with ON_TIME_THRESHOLD, PO_DATE, GR_DATE, PO_QTY_NUM, GR_QTY_NUM, INVOICE_DATE, AMOUNT_NUM.
-    Returns a vendor-level dataframe with applied SLA (mean per vendor), fulfillment, on-time %, avg invoice lag, etc.
-    """
     if "VENDOR" not in df.columns or df.empty:
         return pd.DataFrame()
     df_rows = df.copy()
@@ -535,7 +531,7 @@ def generate_dashboard_charts(k: dict, risk: dict, vendor_perf_df: pd.DataFrame)
         plt.close()
     return charts
 
-# ---------- PDF helpers (new draw_table function) ----------
+# ---------- PDF helpers (improved adaptive draw_table) ----------
 def ensure_pdf_space(pdf_obj: FPDF, needed_height_mm: float):
     try:
         bottom_limit = pdf_obj.h - pdf_obj.b_margin
@@ -582,13 +578,102 @@ def _normalize_col_widths(pdf: PDF, col_w, ncols):
 
 def draw_table(pdf: PDF, headers, rows, proposed_w=None, header_font_size=9, row_font_size=8, alignments=None):
     """
-    Draw a table:
-      - Header row drawn using pdf.cell(...) (single row, centered) to avoid header wrap misalignment.
-      - Body rows drawn with multi_cell per cell, using get_string_width to compute accurate wrapping and row height.
+    Draw a table adaptively:
+      - measure header+content widths (using get_string_width),
+      - compute required widths, ensure Vendor column gets extra space if needed,
+      - reduce numeric columns to minimum widths if necessary to fit usable width.
     """
     ncols = len(headers)
-    col_w = _normalize_col_widths(pdf, proposed_w, ncols)
-    # Draw header (single line cells)
+    usable = pdf.w - pdf.l_margin - pdf.r_margin  # mm
+    # initial col widths (normalized)
+    if proposed_w and len(proposed_w) == ncols:
+        col_w = _normalize_col_widths(pdf, proposed_w, ncols)
+    else:
+        col_w = [usable / ncols for _ in range(ncols)]
+
+    # prepare text samples per column: header + each row cell (converted to str)
+    samples = []
+    for i in range(ncols):
+        col_texts = [sanitize_for_pdf(headers[i])]
+        for r in rows:
+            # ensure we can index
+            if i < len(r):
+                col_texts.append("" if r[i] is None else str(r[i]))
+        samples.append(col_texts)
+
+    # measure required width per column using the larger of header_font_size and row_font_size
+    measure_font_size = max(header_font_size, row_font_size)
+    pdf.set_font("Helvetica", size=measure_font_size)
+    padding_mm = 6.0  # mm padding per column (left+right approx)
+    required = []
+    for col_texts in samples:
+        max_w = 0.0
+        for t in col_texts:
+            # treat newline parts separately: take max linear width among parts
+            parts = t.split("\n")
+            for p in parts:
+                w = pdf.get_string_width(p)
+                if w > max_w:
+                    max_w = w
+        req = max_w + padding_mm
+        required.append(req)
+
+    # impose sensible minimums (mm)
+    min_vendor = 40.0  # vendor column minimum
+    min_numeric = 10.0  # numeric columns minimum
+    # identify vendor column index heuristically: header contains "Vendor" (case-insensitive)
+    vendor_idx = 0
+    for i, h in enumerate(headers):
+        if "VENDOR" in h.upper():
+            vendor_idx = i
+            break
+
+    # ensure required vendor width >= min_vendor
+    required[vendor_idx] = max(required[vendor_idx], min_vendor)
+    # ensure numeric minima for other columns
+    for i in range(ncols):
+        if i != vendor_idx:
+            required[i] = max(required[i], min_numeric)
+
+    total_req = sum(required)
+    # if fits, use required (but may want to preserve proposed pattern: we'll use required)
+    if total_req <= usable:
+        col_w = required.copy()
+        # if leftover, give leftover to vendor column to make it roomy
+        leftover = usable - sum(col_w)
+        if leftover > 1.0:
+            col_w[vendor_idx] += leftover
+    else:
+        # need to shrink columns to fit usable width
+        # start with required widths, reduce non-vendor columns down to min_numeric first
+        col_w = required.copy()
+        reducible = sum(col_w) - usable
+        # list of indices we can reduce (prefer numeric columns)
+        reducible_indices = [i for i in range(ncols) if i != vendor_idx]
+        # attempt to reduce numeric cols proportionally but not below min_numeric
+        for i in reducible_indices:
+            allow = col_w[i] - min_numeric
+            take = min(allow, reducible * (col_w[i] / sum(col_w[j] for j in reducible_indices)))
+            col_w[i] -= take
+            reducible -= take
+            if reducible <= 0:
+                break
+        # if still reducible left, reduce vendor down to its min (but keep readable)
+        if reducible > 0:
+            allow_v = col_w[vendor_idx] - min_vendor
+            take_v = min(allow_v, reducible)
+            col_w[vendor_idx] -= take_v
+            reducible -= take_v
+        # if still reducible, as last resort scale all columns proportionally to usable
+        if reducible > 0:
+            factor = usable / sum(col_w)
+            col_w = [max(6.0, w * factor) for w in col_w]
+            # tiny adjustment to sum exactly usable
+            s = sum(col_w)
+            if abs(s - usable) > 0.01:
+                col_w[0] += (usable - s)
+
+    # Draw header (single-line cells) using header font (prevents header wrap split)
     header_h = max(7, header_font_size * 0.6 + 4)
     pdf.set_font("Helvetica", "B", header_font_size)
     pdf.set_text_color(*BRAND_BLUE)
@@ -596,16 +681,16 @@ def draw_table(pdf: PDF, headers, rows, proposed_w=None, header_font_size=9, row
         pdf.cell(w, header_h, sanitize_for_pdf(h), border=1, align="C")
     pdf.ln(header_h)
     pdf.set_text_color(0, 0, 0)
-    # Prepare alignments
+
+    # Prepare alignments default: vendor left, numbers right
     if alignments is None:
         alignments = ['L'] + ['R'] * (ncols - 1)
-    # Draw rows
+
+    # Draw rows: for each row compute lines needed and render with multi_cell, respecting col_w
     for row in rows:
-        # sanitize row values
         sanitized = [sanitize_for_pdf("" if v is None else str(v)) for v in row]
-        # set font for measuring
+        # measure needed lines per cell (using row_font_size)
         pdf.set_font("Helvetica", size=row_font_size)
-        # compute number of lines per cell using get_string_width
         est_lines = []
         for text, w in zip(sanitized, col_w):
             parts = text.split("\n")
@@ -624,19 +709,16 @@ def draw_table(pdf: PDF, headers, rows, proposed_w=None, header_font_size=9, row
         line_h = max(4.0, row_font_size * 0.35 + 2)
         cell_h = lines_needed * line_h + 2
         ensure_pdf_space(pdf, cell_h + 2)
-        x_start = pdf.get_x()
-        y_start = pdf.get_y()
+        # render each cell
         for i, (text, w) in enumerate(zip(sanitized, col_w)):
             align = alignments[i] if i < len(alignments) else 'L'
             x = pdf.get_x()
             y = pdf.get_y()
-            # draw cell content (multi_cell wraps as needed)
             pdf.multi_cell(w, line_h, text, border=1, align=align)
             pdf.set_xy(x + w, y)
-        # move down exactly cell_h
         pdf.ln(cell_h)
 
-# ---------- generate_pdf (uses draw_table for vendor/material tables) ----------
+# ---------- generate_pdf (uses draw_table) ----------
 def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf = PDF(); pdf.alias_nb_pages(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 20); pdf.set_text_color(*BRAND_BLUE)
@@ -678,17 +760,15 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     pdf.ln(2)
     col_w = [90, 90]
     pdf.set_font("Helvetica", "B", 10)
-    # Use draw_table for consistent header + rows
     draw_table(pdf, ["Metric", "Value"], [(m[0], m[1]) for m in metrics], proposed_w=col_w, header_font_size=10, row_font_size=10, alignments=['L','R'])
     pdf.ln(6)
 
-    # Vendor Performance - include SLA_days column; use draw_table with proposed widths
+    # Vendor Performance - include SLA_days column
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Vendor Performance (Top)"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
     if not vendor_perf_df.empty:
         vdf = vendor_perf_df.copy().head(12)
         headers = ["Vendor", "SLA (d)", "PO Qty", "GR Qty", "Fulfill %", "On-time %", "Partial %", "Avg GR d", "Avg Inv Lag (d)", "Total Spend"]
-        # proposal widths (Vendor column bigger; numeric columns narrower). These will be normalized to usable width.
         proposed_w = [65, 12, 12, 12, 14, 14, 14, 12, 14, 25]
         rows = []
         for _, row in vdf.iterrows():
@@ -721,7 +801,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
         pdf.multi_cell(0, 6, "Vendor performance data not available.")
     pdf.ln(6)
 
-    # Material Category Performance table
+    # Material Category Performance
     pdf.set_text_color(*BRAND_BLUE); pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, sanitize_for_pdf("Material Category Performance"), ln=True)
     pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
     mat = k.get("top_m", {}) or {}
@@ -781,7 +861,7 @@ def generate_pdf(ai_text, insights, k, risk, charts, company, vendor_perf_df):
     out.seek(0)
     return out
 
-# ---------- APP FLOW ----------
+# ---------- APP FLOW (same as before) ----------
 st.subheader("🔐 Verify Access Key")
 col1, col2 = st.columns([3, 1])
 with col1:
